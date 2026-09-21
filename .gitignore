@@ -1,0 +1,19 @@
+.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Django
+*.sqlite3
+/staticfiles/
+/media/
+
+# Editor / sistema operativo
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
