@@ -1,6 +1,4 @@
-from rest_framework import status
-from rest_framework import serializers as drf_serializers
-from rest_framework import viewsets
+from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
@@ -13,18 +11,12 @@ class SensorTypeViewSet(viewsets.ModelViewSet):
     serializer_class = SensorTypeSerializer
 
 
-
-
 class DeviceViewSet(viewsets.ModelViewSet):
     queryset = Device.objects.select_related("greenhouse").all()
     serializer_class = DeviceSerializer
     filterset_fields = ["greenhouse", "is_active"]
 
     def create(self, request, *args, **kwargs):
-        # A diferencia del create() por defecto de ModelViewSet, este
-        # genera la API key inmediatamente después de guardar y la
-        # incluye en la respuesta UNA sola vez. Es el mismo patrón que
-        # ya usa el admin (Etapa 3); ahora ambos caminos son consistentes.
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         device = serializer.save()

@@ -1,13 +1,25 @@
+from rest_framework import viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.sensors.authentication import DeviceKeyAuthentication
 from apps.sensors.permissions import IsDeviceAuthenticated
 
+from .filters import ReadingFilter
 from .models import Reading
-from .serializers import ReadingIngestItemSerializer
+from .pagination import ReadingCursorPagination
+from .serializers import ReadingIngestItemSerializer, ReadingSerializer
 
-# ... (ReadingViewSet, ya existente de la Etapa 5, se mantiene igual)
+
+class ReadingViewSet(viewsets.ReadOnlyModelViewSet):
+    # ReadOnlyModelViewSet expone solo list y retrieve: no permite
+    # crear, editar ni borrar lecturas por esta vía (Etapa 5).
+    queryset = Reading.objects.select_related(
+        "sensor", "sensor__sensor_type", "sensor__greenhouse"
+    ).all()
+    serializer_class = ReadingSerializer
+    filterset_class = ReadingFilter
+    pagination_class = ReadingCursorPagination
 
 
 class ReadingIngestView(APIView):
@@ -19,10 +31,8 @@ class ReadingIngestView(APIView):
         {"sensor_id": 1, "value": 24.5}
         {"readings": [{"sensor_id": 1, "value": 24.5}, {...}]}
 
-    Requiere el header X-Device-Key. NO usa la autenticación de
-    usuario del resto de la API (session/basic), por eso pisamos
-    authentication_classes y permission_classes aquí explícitamente
-    en vez de heredar los DEFAULT_* de settings.
+    Requiere el header X-Device-Key. No usa la autenticación de
+    usuario del resto de la API (session/basic).
     """
     authentication_classes = [DeviceKeyAuthentication]
     permission_classes = [IsDeviceAuthenticated]
@@ -62,9 +72,6 @@ class ReadingIngestView(APIView):
                     {"index": index, "status": "rejected", "errors": serializer.errors}
                 )
 
-        # Un solo INSERT para todo el lote. ignore_conflicts evita que
-        # un duplicado (sensor + timestamp ya existente, ej. un reintento
-        # de red) tumbe el resto del lote con un IntegrityError.
         if to_create:
             Reading.objects.bulk_create(to_create, ignore_conflicts=True)
 
@@ -72,10 +79,6 @@ class ReadingIngestView(APIView):
         rejected = len(results) - accepted
 
         return Response(
-            {
-                "accepted": accepted,
-                "rejected": rejected,
-                "results": results,
-            },
+            {"accepted": accepted, "rejected": rejected, "results": results},
             status=200,
         )

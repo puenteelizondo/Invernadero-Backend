@@ -6,6 +6,10 @@ from .views import ReadingIngestView, ReadingViewSet
 router = DefaultRouter()
 router.register("readings", ReadingViewSet)
 
-urlpatterns = router.urls + [
-    path("readings/ingest/", ReadingIngestView.as_view(), name="reading-ingest"),
-]
+urlpatterns = [
+    path(
+        "readings/ingest/",
+        ReadingIngestView.as_view(),
+        name="reading-ingest",
+    ),
+] + router.urls
