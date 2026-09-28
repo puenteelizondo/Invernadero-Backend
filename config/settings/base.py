@@ -12,7 +12,7 @@ import environ
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 env = environ.Env()
-
+READING_EXPORT_MAX_DAYS = 366
 # --- Seguridad básica -------------------------------------------------
 # Sin valor por defecto: si falta en el entorno, Django se niega a arrancar.
 SECRET_KEY = env("DJANGO_SECRET_KEY")
@@ -27,16 +27,17 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
+    "daphne",                      # NUEVO — debe ir antes de staticfiles
     "django.contrib.staticfiles",
-    # --- terceros ---
     "rest_framework",
     "django_filters",
-    # --- apps propias ---
+    "channels",                    # NUEVO
     "apps.users",
     "apps.greenhouses",
     "apps.sensors",
     "apps.readings",
     "apps.actuators",
+    "apps.memberships",
 ]
 
 MIDDLEWARE = [
@@ -137,3 +138,27 @@ REST_FRAMEWORK = {
 # simples en vez de variables de .env.
 READING_TIMESTAMP_MAX_FUTURE_SECONDS = 300        # 5 minutos de adelanto
 READING_TIMESTAMP_MAX_PAST_SECONDS = 7 * 24 * 3600  # 7 días de atraso
+
+
+# --- Channels / WebSockets ---------------------------------------------
+ASGI_APPLICATION = "config.asgi.application"
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [
+                {
+                    "address": env("REDIS_URL", default="redis://redis:6379/0"),
+                    "socket_timeout": None,
+                }
+            ],
+        },
+    },
+}
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": env("REDIS_CACHE_URL", default="redis://redis:6379/1"),
+    }
+}

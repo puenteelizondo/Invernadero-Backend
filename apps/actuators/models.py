@@ -1,4 +1,5 @@
 from django.db import models
+from apps.common.realtime import publish_event
 
 
 class ActuatorType(models.Model):
@@ -73,19 +74,7 @@ class Actuator(models.Model):
                 {"zone": "La zona debe pertenecer al mismo invernadero que el actuador."}
             )
 
-    def set_state(self, new_state: bool, *, user=None,
-                  source: str = "manual") -> bool:
-        """
-        Único punto de entrada para cambiar el estado. Actualiza el
-        campo `state` (para lecturas rápidas) y crea el registro de
-        historial (para auditoría) en la misma operación, así nunca
-        quedan desincronizados.
-
-        Devuelve True si hubo un cambio real (y por lo tanto debe
-        publicarse un evento de WebSocket); False si el estado
-        pedido ya era el actual, para evitar ruido de eventos y
-        entradas de historial sin cambios reales.
-        """
+    def set_state(self, new_state: bool, *, user=None, source: str = "manual") -> bool:
         if new_state == self.state:
             return False
 
@@ -94,6 +83,19 @@ class Actuator(models.Model):
 
         ActuatorStateHistory.objects.create(
             actuator=self, state=new_state, changed_by=user, source=source,
+        )
+
+        publish_event(                                    # NUEVO
+            self.greenhouse_id,
+            "actuator_state_changed",
+            {
+                "actuator_id": self.id,
+                "name": self.name,
+                "greenhouse_id": self.greenhouse_id,
+                "state": self.state,
+                "changed_by": user.username if user else None,
+                "source": source,
+            },
         )
         return True
 

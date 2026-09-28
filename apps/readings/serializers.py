@@ -24,11 +24,6 @@ class ReadingSerializer(serializers.ModelSerializer):
 
 
 class ReadingIngestItemSerializer(serializers.Serializer):
-    """
-    Valida UNA lectura dentro de un lote de ingesta. No crea el
-    objeto directamente: la vista junta los resultados válidos de
-    todo el lote y hace un solo bulk_create al final.
-    """
     sensor_id = serializers.IntegerField()
     value = serializers.FloatField()
     timestamp = serializers.DateTimeField(required=False)
@@ -42,7 +37,6 @@ class ReadingIngestItemSerializer(serializers.Serializer):
         now = timezone.now()
         max_future = settings.READING_TIMESTAMP_MAX_FUTURE_SECONDS
         max_past = settings.READING_TIMESTAMP_MAX_PAST_SECONDS
-
         if value > now + timezone.timedelta(seconds=max_future):
             raise serializers.ValidationError(
                 "El timestamp está demasiado adelantado respecto al servidor."
@@ -54,7 +48,7 @@ class ReadingIngestItemSerializer(serializers.Serializer):
     def validate(self, attrs):
         device = self.context["device"]
         try:
-            sensor = Sensor.objects.select_related("sensor_type").get(
+            sensor = Sensor.objects.select_related("sensor_type", "greenhouse").get(
                 pk=attrs["sensor_id"]
             )
         except Sensor.DoesNotExist:
@@ -80,4 +74,33 @@ class ReadingIngestItemSerializer(serializers.Serializer):
 
         attrs["sensor"] = sensor
         attrs.setdefault("timestamp", timezone.now())
+        return attrs
+
+
+class ReadingExportQuerySerializer(serializers.Serializer):
+    """
+    Valida los parámetros de /readings/export/. Es un serializer
+    "suelto" (no ligado a un modelo) porque lo único que necesita es
+    validar query params de un GET, no serializar filas.
+    """
+    date_from = serializers.DateTimeField()
+    date_to = serializers.DateTimeField()
+    sensor = serializers.IntegerField(required=False)
+
+    def validate(self, attrs):
+        if attrs["date_to"] <= attrs["date_from"]:
+            raise serializers.ValidationError(
+                {"date_to": "Debe ser posterior a date_from."}
+            )
+
+        max_days = settings.READING_EXPORT_MAX_DAYS
+        span_days = (attrs["date_to"] - attrs["date_from"]).days
+        if span_days > max_days:
+            raise serializers.ValidationError(
+                {"date_to": f"El rango no puede superar {max_days} días."}
+            )
+
+        if "sensor" in attrs and not Sensor.objects.filter(pk=attrs["sensor"]).exists():
+            raise serializers.ValidationError({"sensor": "El sensor no existe."})
+
         return attrs

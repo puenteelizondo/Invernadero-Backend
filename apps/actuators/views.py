@@ -1,10 +1,13 @@
 from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
+from apps.memberships.mixins import GreenhouseScopedMixin
+from apps.memberships.permissions import IsGreenhouseMember, IsGreenhouseOperatorOrAbove
+
 from .models import Actuator, ActuatorType
-from .permissions import CanControlActuators
 from .serializers import (
     ActuatorSerializer,
     ActuatorStateChangeSerializer,
@@ -14,24 +17,34 @@ from .serializers import (
 
 
 class ActuatorTypeViewSet(viewsets.ModelViewSet):
+    """
+    Catálogo GLOBAL (igual que SensorType): lectura abierta a
+    cualquier autenticado, escritura solo para staff.
+    """
     queryset = ActuatorType.objects.all()
     serializer_class = ActuatorTypeSerializer
 
+    def get_permissions(self):
+        if self.action in ("create", "update", "partial_update", "destroy"):
+            return [IsAdminUser()]
+        return super().get_permissions()
 
-class ActuatorViewSet(viewsets.ModelViewSet):
+
+class ActuatorViewSet(GreenhouseScopedMixin, viewsets.ModelViewSet):
+    serializer_class = ActuatorSerializer
+    permission_classes = [IsGreenhouseMember]
+    filterset_fields = ["greenhouse", "zone", "actuator_type", "is_active", "state"]
+    search_fields = ["name"]
     queryset = Actuator.objects.select_related(
         "actuator_type", "greenhouse", "zone", "device"
     ).all()
-    serializer_class = ActuatorSerializer
-    filterset_fields = ["greenhouse", "zone", "actuator_type", "is_active", "state"]
-    search_fields = ["name"]
 
     def get_permissions(self):
-        # Todo lo demás en este ViewSet hereda el permiso por defecto
-        # (IsAuthenticated, ver settings). Solo la acción de control
-        # exige además ser staff.
+        # Etapa 12: reemplaza el placeholder CanControlActuators
+        # (is_staff) por el rol real dentro del invernadero — Owner u
+        # Operator pueden controlar; Viewer solo puede ver.
         if self.action == "state":
-            return [CanControlActuators()]
+            return [IsGreenhouseOperatorOrAbove()]
         return super().get_permissions()
 
     @action(detail=True, methods=["post"])
@@ -45,11 +58,6 @@ class ActuatorViewSet(viewsets.ModelViewSet):
             user=request.user,
             source="manual",
         )
-
-        # TODO (Etapa 7): si changed es True, publicar el evento
-        # actuator_state_changed al grupo de WebSocket del invernadero.
-        # Por ahora solo respondemos por HTTP; el WebSocket se conecta
-        # aquí mismo cuando implementemos Channels.
 
         return Response(
             {
