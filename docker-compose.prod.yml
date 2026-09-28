@@ -1,0 +1,71 @@
+# Variante de docker-compose.yml para producción. Uso:
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Diferencias contra docker-compose.yml (desarrollo):
+#   - DJANGO_SETTINGS_MODULE=config.settings.prod (ver ese archivo para
+#     el detalle: HTTPS forzado, cookies seguras, HSTS, etc.)
+#   - Sin bind-mount del código (`.:/app`): corre lo que quedó COPY-eado
+#     en la imagen al hacer build, no tu carpeta en vivo -- así un
+#     archivo a medio editar en tu máquina nunca se sirve en producción.
+#   - El comando corre `migrate` y `collectstatic` antes de levantar
+#     Daphne directamente (sin el autoreloader de `runserver`).
+#   - No expone el puerto de Postgres al host (en desarrollo se expone
+#     por conveniencia, para DBeaver/pgAdmin).
+#
+# Lo que sigue faltando aquí, fuera de alcance de este archivo porque
+# depende de tu hosting real y no hay una única respuesta correcta:
+#   - Un reverse proxy (Nginx u otro) delante de este contenedor, para
+#     terminar TLS y servir la carpeta STATIC_ROOT (config/settings/
+#     prod.py). Daphne por sí solo no sirve HTTPS ni archivos estáticos
+#     de forma eficiente.
+#   - Backups del volumen de Postgres.
+#   - Un registry de imágenes, si compilas en una máquina distinta a
+#     donde despliegas.
+name: invernadero-prod
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build: .
+    env_file: .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.prod
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput &&
+             daphne -b 0.0.0.0 -p 8000 config.asgi:application"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:

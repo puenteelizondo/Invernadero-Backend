@@ -253,6 +253,14 @@ Tomadas de `config/settings/base.py` y `.env.example`. Ninguno de los valores mo
 | `REDIS_URL` | No | URL de Redis para el **channel layer** de Django Channels (WebSockets). Por defecto `redis://redis:6379/0`. | `redis://redis:6379/0` |
 | `REDIS_CACHE_URL` | No | URL de Redis para el **backend de caché** de Django (política de persistencia de lecturas, "último valor conocido", y tokens de un solo uso del WebSocket). Por defecto `redis://redis:6379/1`. | `redis://redis:6379/1` |
 | `CORS_ALLOWED_ORIGINS` | No | Lista de orígenes permitidos para CORS, separados por coma. Por defecto, lista vacía (ningún origen externo permitido hasta configurarlo). | `http://localhost:5173,http://127.0.0.1:5173` |
+| `CSRF_TRUSTED_ORIGINS` | No | Solo `config.settings.prod`. Dominios desde los que se acepta un POST/PUT/PATCH/DELETE autenticado por sesión. Por defecto, lista vacía. | `https://tu-dominio.com` |
+| `SECURE_HSTS_SECONDS` | No | Solo `config.settings.prod`. Segundos que le pide al navegador recordar "entra siempre por HTTPS". Por defecto, 7 días (`604800`). | `604800` |
+| `EMAIL_BACKEND` | No | Backend de envío de correo (recuperación de contraseña). Por defecto, el de consola (imprime el correo en los logs en vez de enviarlo). | `django.core.mail.backends.smtp.EmailBackend` |
+| `EMAIL_HOST` | No | Host SMTP. Solo importa si `EMAIL_BACKEND` es el de SMTP. Por defecto `localhost`. | `smtp.tu-proveedor.com` |
+| `EMAIL_PORT` | No | Puerto SMTP. Por defecto `25`. | `587` |
+| `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | No | Credenciales SMTP. Por defecto vacías. | *(las que te dé tu proveedor de correo)* |
+| `EMAIL_USE_TLS` | No | Si la conexión SMTP usa TLS. Por defecto `True`. | `True` |
+| `DEFAULT_FROM_EMAIL` | No | Remitente de los correos que manda la API. Por defecto `no-responder@invernadero.local`. | `no-responder@tu-dominio.com` |
 
 `.env` está excluido de Git (`.gitignore`) y de la imagen Docker (`.dockerignore`); solo `.env.example` se versiona.
 
@@ -427,7 +435,7 @@ Configurado en `REST_FRAMEWORK` dentro de `config/settings/base.py`. Existen **d
 
 - **BasicAuthentication**: usuario y contraseña en cada petición (header `Authorization: Basic <base64(usuario:contraseña)>`). Es lo que se usa para probar la API con Postman o desde un script.
 - **SessionAuthentication**: usa la cookie de sesión de Django. Permite navegar la API desde el navegador después de iniciar sesión en `/admin/` o en `/api-auth/login/` (esta última ruta, montada en `config/urls.py`, es explícitamente solo para navegar la API en desarrollo — no la usa Postman ni un frontend real).
-- **No hay JWT, ni tokens de acceso/refresh, ni verificación de email, ni recuperación de contraseña.**
+- **No hay JWT, ni tokens de acceso/refresh, ni verificación de email.**
 - **Registro público**: `POST /api/v1/auth/register/` (`apps/users/views.py::RegisterView`) — endpoint público (`AllowAny`, sin autenticación previa) para que un usuario nuevo cree su propia cuenta, sin depender de `createsuperuser`/admin. La contraseña se valida con las mismas 4 reglas de `AUTH_PASSWORD_VALIDATORS` que ya usaba el admin (similitud con datos del usuario, longitud mínima, contraseñas comunes, no-solo-numérica). No crea ninguna `Membership` ni invernadero — eso pasa después, cuando el usuario crea su propio invernadero (se vuelve Owner automáticamente) o alguien lo invita a uno existente.
 
   **Request**:
@@ -443,7 +451,28 @@ Configurado en `REST_FRAMEWORK` dentro de `config/settings/base.py`. Existen **d
   **Errores**: `400` si `username` ya existe, si `email` ya existe (aunque el modelo de Django no lo exige único por defecto, este endpoint sí lo valida), o si la contraseña no pasa las validaciones (ej. `{"password": ["Esta contraseña es demasiado común."]}`).
 
   Comparte el `AnonRateThrottle` global (`60/minute` por IP, ver [Seguridad](#seguridad)) — no tiene un límite propio.
-- **Creación de usuarios de staff/admin**: sigue siendo únicamente vía `python manage.py createsuperuser` o el panel `/admin/` — el registro público de arriba nunca crea usuarios `is_staff`.
+- **Recuperación de contraseña**: dos pasos, público, sin autenticación previa (obviamente — si pudieras loguearte no necesitarías esto).
+
+  **1. `POST /api/v1/auth/password-reset/`** — pides el reseteo con tu email:
+  ```json
+  { "email": "nuevo@ejemplo.com" }
+  ```
+  **Response 200, SIEMPRE el mismo mensaje exista o no el email**:
+  ```json
+  { "detail": "Si el email está registrado, se mandó un correo con instrucciones." }
+  ```
+  Que la respuesta no cambie según si el email existe es intencional — si variara, cualquiera podría usar este endpoint para averiguar qué correos tienen cuenta (enumeración de usuarios). El correo en sí (con un `uid` y un `token` de un solo uso, generados con el mismo mecanismo que usan las vistas de Django desde hace años — `default_token_generator`) solo se manda si el usuario existe.
+
+  Con la configuración por defecto (sin `EMAIL_BACKEND` en tu `.env`), el correo **no se envía de verdad** — se imprime en los logs (`docker compose logs web`), así puedes probar el flujo completo en desarrollo sin credenciales SMTP reales. Ver [Variables de entorno](#variables-de-entorno) para configurar un SMTP real.
+
+  **2. `POST /api/v1/auth/password-reset/confirm/`** — con el `uid`/`token` que llegaron por correo, pones la contraseña nueva:
+  ```json
+  { "uid": "OA", "token": "cz3x1a-1234567890abcdef1234567890ab", "password": "unaContraseñaNuevaSegura123" }
+  ```
+  **Response 200**: `{ "detail": "Contraseña actualizada." }`
+
+  **Errores**: `400` si `uid`/`token` son inválidos o ya expiraron (`PASSWORD_RESET_TIMEOUT` de Django, 3 días por defecto — no lo cambiamos), o si la contraseña nueva no pasa `AUTH_PASSWORD_VALIDATORS`. El token es de un solo uso: en cuanto cambias la contraseña, `default_token_generator` lo invalida solo (no hace falta guardar/borrar nada aparte).
+- **Creación de usuarios de staff/admin**: sigue siendo únicamente vía `python manage.py createsuperuser` o el panel `/admin/` — ni el registro público ni la recuperación de contraseña crean o tocan usuarios `is_staff`.
 - Por defecto (`IsAuthenticated`), **todo** endpoint exige estar autenticado, salvo que la vista lo declare explícitamente distinto.
 
 Ejemplo de cómo debe autenticarse el frontend (Basic Auth, que es lo único disponible hoy):
@@ -912,20 +941,49 @@ docker compose down -v          # detener y BORRAR también el volumen de Postgr
 
 ## Producción
 
-**No identificado en el código**: no existe un `config/settings/prod.py`, ni un `Dockerfile`/`docker-compose` separado para producción, ni configuración de Nginx, ni de HTTPS/dominios, ni de `STATIC_ROOT`/recolección de estáticos (`collectstatic`) con un servidor de archivos estáticos real.
+`config/settings/prod.py` (nuevo) + `docker-compose.prod.yml` (nuevo) dan una base real de producción — no es "todo lo que necesitas para desplegar en cualquier hosting", pero ya no es cero.
 
-Lo que **sí** está preparado en el código, pensando en que se agregue después:
+### `config/settings/prod.py`
 
-- `DEBUG` controla explícitamente si se activa `AllowedHostsOriginValidator` en el WebSocket (solo en producción).
-- `SECRET_KEY`, credenciales de base de datos y URLs de Redis ya salen de variables de entorno, no están hardcodeadas.
-- `DJANGO_ALLOWED_HOSTS` ya es una variable de entorno lista para poblarse con el/los dominio(s) reales.
-- `config/wsgi.py` existe (por si se sirve con un servidor WSGI tradicional para la parte HTTP), aunque el proyecto está pensado para ASGI (Daphne) porque necesita WebSockets — usar solo WSGI dejaría sin funcionar `/ws/...`.
+Hereda de `base.py` (`from .base import *`) y solo agrega lo que es distinto en producción. Se activa con `DJANGO_SETTINGS_MODULE=config.settings.prod` (ya viene puesto así en `docker-compose.prod.yml`):
 
-Lo que haría falta definir para desplegar en producción (no existe en el proyecto hoy, así que no se documenta como si existiera):
-- Un `prod.py` que herede de `base.py` con `DEBUG=False`, `ALLOWED_HOSTS` reales, y probablemente `SECURE_*` (HSTS, cookies seguras, etc.).
-- Reemplazar el `CMD` del `Dockerfile` (hoy `runserver`, servidor de desarrollo) por Daphne invocado directamente, o un proceso equivalente detrás de un proxy (Nginx u otro).
-- Manejo de archivos estáticos (`collectstatic` + servidor de estáticos).
-- Redis con persistencia si se decide que el caché de "último valor conocido" deba sobrevivir un reinicio (hoy no la tiene, ver tabla de Docker).
+| Setting | Valor | Por qué |
+|---|---|---|
+| `DEBUG` | `False` (forzado) | No depende de que nadie recuerde poner `DEBUG=False` en el `.env` de producción. |
+| `SECURE_SSL_REDIRECT` | `True` por defecto (`env.bool`) | Redirige HTTP → HTTPS automáticamente. |
+| `SECURE_PROXY_SSL_HEADER` | `("HTTP_X_FORWARDED_PROTO", "https")` | Asume un proxy (Nginx u otro) delante que termina TLS y reenvía este header. Si no tienes proxy delante, quítalo. |
+| `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE` | `True` | Las cookies de sesión/CSRF solo viajan por HTTPS. |
+| `SECURE_HSTS_SECONDS` | 7 días por defecto (`env.int`) | Le dice al navegador "entra siempre por HTTPS a este dominio". Empieza corto a propósito, no en el año que sugiere Django para producción madura, para no dejarte un dominio inaccesible por HTTP mucho tiempo si algo queda mal configurado. |
+| `CSRF_TRUSTED_ORIGINS` | `env.list(...)`, default vacío | Necesario en Django 4+ para que el frontend pueda mandar peticiones autenticadas por sesión desde su propio dominio. |
+| `STATIC_ROOT` | `BASE_DIR / "staticfiles"` | Para que `collectstatic` tenga dónde juntar los estáticos del admin y de la browsable API de DRF. |
+
+**No identificado / fuera de alcance a propósito**: cómo *servir* esa carpeta `STATIC_ROOT` (Nginx, un bucket, `whitenoise`, etc.) — no se agregó una dependencia nueva al proyecto sin que lo decidas tú.
+
+### `docker-compose.prod.yml`
+
+```
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+Diferencias contra `docker-compose.yml` (desarrollo):
+- `DJANGO_SETTINGS_MODULE=config.settings.prod`.
+- Sin bind-mount del código (`.:/app`) — corre lo que quedó `COPY`-eado en la imagen al hacer build, nunca tu carpeta en vivo.
+- El `command` corre `migrate` y `collectstatic --noinput` antes de levantar **Daphne directamente** (`daphne -b 0.0.0.0 -p 8000 config.asgi:application`), sin el autoreloader de `runserver`.
+- El puerto de Postgres no se expone al host (en desarrollo se expone por conveniencia, para DBeaver/pgAdmin).
+
+**Sigue faltando** (fuera de alcance de este archivo, depende de tu hosting real): un reverse proxy (Nginx u otro) delante de este contenedor para TLS y para servir `STATIC_ROOT` — Daphne solo no hace ninguna de las dos cosas de forma eficiente; backups del volumen de Postgres; un registry de imágenes si compilas en una máquina distinta a donde despliegas.
+
+### `Dockerfile`
+
+El `CMD` por defecto (`runserver`, el que usa `docker-compose.yml` de desarrollo) **no cambió** — sigue siendo el servidor de desarrollo, y sigue sirviendo WebSockets bien porque `runserver` delega en Daphne automáticamente al detectar `channels`/`ASGI_APPLICATION` (lo ves en los logs: *"Starting ASGI/Daphne..."*). El comentario viejo que decía *"Lo cambiaremos por Daphne en la Etapa 7"* ya no aplica — se corrigió para explicar esto, en vez de prometer un cambio que además habría roto el flujo de desarrollo (el bind-mount y el autoreload dependen de `runserver`).
+
+Lo que sí se agregó al `Dockerfile`: `chown -R appuser:appuser /app` antes de cambiar de usuario — sin esto, `collectstatic` (que corre como `appuser`, no como root) no podía escribir en `/app/staticfiles`.
+
+### Lo que sigue sin existir (constatado por ausencia, no una opinión)
+
+- `config/wsgi.py` existe (por si algún día se sirve con un servidor WSGI tradicional para la parte HTTP), aunque el proyecto está pensado para ASGI (Daphne) porque necesita WebSockets — usar solo WSGI dejaría sin funcionar `/ws/...`.
+- No hay reverse proxy (Nginx u otro) configurado en ningún `docker-compose*.yml`.
+- No hay pipeline de CI/CD, ni definición de dónde correría `docker-compose.prod.yml` (tu propia máquina, un VPS, un servicio administrado) — eso depende de dónde decidas desplegar.
 
 ---
 
@@ -1035,7 +1093,8 @@ Lo que **no** está implementado (constatado por ausencia en el código, no una 
 
 - **HTTPS**: no hay `SECURE_SSL_REDIRECT`, `SESSION_COOKIE_SECURE` ni configuración similar en `base.py`/`dev.py` — depende enteramente de cómo se despliegue en producción (fuera del alcance de este código).
 - **JWT / tokens de acceso para la API HTTP**: no implementado; la única forma de autenticarse como usuario contra la API REST es Basic Auth o sesión de Django (el token de un solo uso descrito arriba es exclusivo del handshake de WebSocket, no reemplaza la autenticación HTTP).
-- ~~Registro de usuarios~~ — **resuelto**: `POST /api/v1/auth/register/`, ver [Autenticación](#autenticación). **Recuperación de contraseña sigue sin implementar** — no hay envío de email en el proyecto (ni configuración de `EMAIL_BACKEND`), así que un flujo de "olvidé mi contraseña" quedaría fuera del alcance actual sin agregar esa pieza primero.
+- ~~Registro de usuarios~~ — **resuelto**: `POST /api/v1/auth/register/`, ver [Autenticación](#autenticación).
+- ~~Recuperación de contraseña~~ — **resuelto**: `POST /api/v1/auth/password-reset/` + `POST /api/v1/auth/password-reset/confirm/`, con envío de correo (`EMAIL_BACKEND`, por defecto a consola en desarrollo); ver [Autenticación](#autenticación) y [Variables de entorno](#variables-de-entorno).
 
 ---
 
@@ -1067,8 +1126,8 @@ Cosas que valen la pena que sepas antes de construir el frontend o de llevar est
 - ~~`REDIS_CACHE_URL` no está documentada en `.env.example`~~ — **resuelto**: ya aparece listada junto a `REDIS_URL` en `.env.example`, con comentario.
 - **No hay endpoint de registro ni de login de API "real"** — crear usuarios depende de `createsuperuser`/shell/admin; no hay forma de que un cliente se registre por sí mismo, ni de recuperar contraseña.
 - ~~Invitar a un usuario a un invernadero requiere su `id` numérico~~ — **resuelto**: `POST /api/v1/memberships/` ahora también acepta `invite` (`username` o `email`) en vez de `user`; ver [Membresías](#membresías-appsmemberships).
-- **El `Dockerfile` sigue usando el servidor de desarrollo de Django** (`CMD ["python", "manage.py", "runserver", ...]`) — un comentario en el propio archivo dice *"Lo cambiaremos por Daphne (servidor ASGI) en la Etapa 7"*, pero el `CMD` no se actualizó; en la práctica funciona porque `runserver` delega en Daphne automáticamente al detectar `channels`/`ASGI_APPLICATION`, pero Django sigue emitiendo la advertencia de que no es apto para producción.
-- **No hay `prod.py`, ni Dockerfile/compose de producción** — ver [Producción](#producción).
+- ~~El `Dockerfile` sigue usando el servidor de desarrollo / comentario desactualizado~~ — **resuelto**: el comentario ahora explica por qué `CMD` sigue siendo `runserver` en desarrollo (no es un descuido); producción usa Daphne directo vía `docker-compose.prod.yml`.
+- ~~No hay `prod.py`, ni Dockerfile/compose de producción~~ — **resuelto** (con alcance acotado): ver [Producción](#producción). Sigue faltando un reverse proxy real y CI/CD, que dependen de dónde despliegues.
 - ~~Redis no tiene volumen persistente~~ — **resuelto**: `docker-compose.yml` ahora monta `redis_data:/data`, así que el "último valor conocido" de cada sensor y el estado de la política de persistencia sobreviven aunque se recree el contenedor (`down`/`up --build`), no solo un `restart`. Sigue siendo un caché reconstruible, no la fuente de verdad — las lecturas ya guardadas en PostgreSQL nunca dependieron de esto.
 - ~~Sin rate limiting~~ — **resuelto**: `AnonRateThrottle`/`UserRateThrottle` en toda la API (`60/minute`, `300/minute`) y `DeviceRateThrottle` propio para la ingesta (`120/minute` por dispositivo); ver [Seguridad](#seguridad). Los números son un punto de partida razonable, no medidos contra tráfico real — ajústalos en `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` (`config/settings/base.py`) si en la práctica resultan muy estrictos o muy laxos.
 - **Sin tests automatizados** en ninguna app.

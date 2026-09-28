@@ -131,6 +131,25 @@ STATIC_URL = "static/"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# --- Email ---------------------------------------------------------------
+# Backend de consola por defecto: el correo se imprime en los logs
+# (`docker compose logs web`) en vez de enviarse de verdad. Así el
+# flujo de recuperación de contraseña (apps/users) funciona "out of
+# the box" sin necesitar credenciales SMTP reales en desarrollo.
+# Para producción, define EMAIL_BACKEND (normalmente
+# "django.core.mail.backends.smtp.EmailBackend") y las variables de
+# abajo en tu .env -- ninguna tiene efecto mientras siga siendo el
+# backend de consola.
+EMAIL_BACKEND = env(
+    "EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend"
+)
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="no-responder@invernadero.local")
+EMAIL_HOST = env("EMAIL_HOST", default="localhost")
+EMAIL_PORT = env.int("EMAIL_PORT", default=25)
+EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
+EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
+
 
 
 # --- Django REST Framework ---------------------------------------------
