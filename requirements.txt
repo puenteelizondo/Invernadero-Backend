@@ -3,6 +3,7 @@ psycopg[binary]==3.3.3
 django-environ==0.13.0
 djangorestframework==3.18.1
 django-filter==26.1
+django-cors-headers==4.9.0
 channels==4.3.2
 channels-redis==4.3.0
 daphne==4.2.3

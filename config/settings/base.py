@@ -20,6 +20,25 @@ SECRET_KEY = env("DJANGO_SECRET_KEY")
 DEBUG = env.bool("DEBUG", default=False)
 ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=[])
 
+# --- CORS ---------------------------------------------------------------
+# Sin esto, un frontend en otro origen (ej. http://localhost:5173 en
+# desarrollo, o tu dominio real en producción) no puede llamar a esta API
+# desde el navegador: el navegador bloquea la respuesta por la política de
+# mismo origen si no trae los headers Access-Control-Allow-*.
+#
+# Lista blanca explícita por entorno (nunca "abrir a todos" por defecto):
+# en vez de CORS_ALLOW_ALL_ORIGINS=True, cada entorno declara en su .env
+# exactamente qué orígenes puede llamarlo. Por defecto, lista vacía — sin
+# configurar nada, NINGÚN origen externo puede usar la API (falla hacia el
+# lado seguro, igual que SECRET_KEY/DEBUG arriba).
+CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
+# True porque el frontend puede autenticarse con SessionAuthentication
+# (cookie de sesión) además de Basic Auth. Con CORS_ALLOWED_ORIGINS como
+# lista explícita (nunca "*"), django-cors-headers responde con el origen
+# exacto que hizo la petición — combinación que sí permite credenciales,
+# a diferencia de un comodín.
+CORS_ALLOW_CREDENTIALS = True
+
 # --- Aplicaciones -----------------------------------------------------
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -29,6 +48,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "daphne",                      # NUEVO — debe ir antes de staticfiles
     "django.contrib.staticfiles",
+    "corsheaders",                 # NUEVO
     "rest_framework",
     "django_filters",
     "channels",                    # NUEVO
@@ -42,6 +62,12 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # CorsMiddleware va lo más arriba posible, y SIEMPRE antes de
+    # CommonMiddleware: CommonMiddleware puede generar una respuesta
+    # propia (ej. redirect por falta de slash final) antes de que el
+    # request llegue más abajo, y esa respuesta también necesita los
+    # headers de CORS para que el navegador no la bloquee.
+    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",

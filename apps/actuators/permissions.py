@@ -1,15 +1,10 @@
-from rest_framework.permissions import BasePermission
-
-
-class CanControlActuators(BasePermission):
-    """
-    Marcador de posición hasta la Etapa 12 (roles y permisos por
-    invernadero). Por ahora, solo el staff puede cambiar el estado
-    de un actuador; cualquier usuario autenticado puede solo LEER.
-    Aislar esta regla en su propia clase significa que cuando
-    construyamos roles reales, solo se edita este archivo — ninguna
-    vista cambia.
-    """
-
-    def has_permission(self, request, view):
-        return bool(request.user and request.user.is_staff)
+# Este archivo quedó sin uso: `CanControlActuators` era un marcador de
+# posición ("solo staff puede controlar actuadores") hasta que la Etapa 12
+# (apps.memberships) trajo el control real por rol (Owner/Operator/Viewer).
+# apps/actuators/views.py ya usa IsGreenhouseOperatorOrAbove en su lugar.
+#
+# Seguro de borrar: nada en el proyecto importa este módulo (verificado
+# con grep antes de vaciarlo). Bórralo con:
+#
+#   del apps\actuators\permissions.py   (Windows)
+#   rm apps/actuators/permissions.py    (Linux/Mac)

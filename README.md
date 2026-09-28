@@ -251,7 +251,8 @@ Tomadas de `config/settings/base.py` y `.env.example`. Ninguno de los valores mo
 | `POSTGRES_HOST` | **Sí** | Host de PostgreSQL. Dentro de Docker Compose es el nombre del servicio. | `db` |
 | `POSTGRES_PORT` | No | Puerto de PostgreSQL. Por defecto `5432`. | `5432` |
 | `REDIS_URL` | No | URL de Redis para el **channel layer** de Django Channels (WebSockets). Por defecto `redis://redis:6379/0`. | `redis://redis:6379/0` |
-| `REDIS_CACHE_URL` | No | URL de Redis para el **backend de caché** de Django (política de persistencia de lecturas, "último valor conocido"). Por defecto `redis://redis:6379/1` (nota: no aparece en `.env.example`, ver [Observaciones](#observaciones--pendientes)). | `redis://redis:6379/1` |
+| `REDIS_CACHE_URL` | No | URL de Redis para el **backend de caché** de Django (política de persistencia de lecturas, "último valor conocido", y tokens de un solo uso del WebSocket). Por defecto `redis://redis:6379/1`. | `redis://redis:6379/1` |
+| `CORS_ALLOWED_ORIGINS` | No | Lista de orígenes permitidos para CORS, separados por coma. Por defecto, lista vacía (ningún origen externo permitido hasta configurarlo). | `http://localhost:5173,http://127.0.0.1:5173` |
 
 `.env` está excluido de Git (`.gitignore`) y de la imagen Docker (`.dockerignore`); solo `.env.example` se versiona.
 
@@ -740,6 +741,22 @@ Quién tiene acceso a qué invernadero. Solo el Owner del invernadero en cuesti�
 
 ---
 
+### Tiempo real (`apps/realtime`)
+
+#### `POST /api/v1/realtime/ws-token/`
+Emite un token de un solo uso para abrir el WebSocket de tiempo real (ver [WebSockets](#websockets--tiempo-real)). Requiere estar autenticado (`IsAuthenticated`) por cualquiera de los métodos normales (Basic Auth o sesión); no valida rol ni invernadero aquí — eso lo hace `GreenhouseConsumer.connect()` al conectar con el token.
+
+**Request**: sin cuerpo.
+
+**Response 200**:
+```json
+{ "token": "kQ2f9x...s8h3", "expires_in": 30 }
+```
+
+**Errores**: `401` si no estás autenticado.
+
+---
+
 ### Resumen de códigos de estado por tipo de operación
 
 Códigos que realmente puede producir la API (no una lista genérica):
@@ -790,8 +807,12 @@ Códigos que realmente puede producir la API (no una lista genérica):
 
 - **Tecnología**: Django Channels 4 sobre Daphne (ASGI), con Redis como *channel layer* (`channels_redis.core.RedisChannelLayer`) — necesario para que los eventos se distribuyan aunque haya varios procesos/workers Django corriendo.
 - **Endpoint**: `ws://localhost:8000/ws/greenhouses/<greenhouse_id>/` (o `wss://` en producción). Definido en `apps/realtime/routing.py` e incluido en `config/asgi.py`.
-- **Autenticación / autorización**: **no hay ninguna** dentro del consumer (`apps/realtime/consumers.py`) — `connect()` acepta la conexión sin comprobar quién es el usuario ni si tiene `Membership` en ese invernadero. La única validación que existe es de **origen** (`AllowedHostsOriginValidator`), y solo se activa cuando `DEBUG=False`; en desarrollo se omite a propósito para poder probar con Postman/wscat, que no mandan header `Origin`. Ver [Observaciones](#observaciones--pendientes) — esto es una brecha real de seguridad para producción.
-- **Al conectar**: el servidor manda inmediatamente un evento `snapshot` con el último valor conocido de cada sensor activo (leído de Redis, no de PostgreSQL) y el estado actual de cada actuador activo del invernadero — así el cliente no arranca "en blanco".
+- **Autenticación / autorización**: mediante un **token corto, de un solo uso** (`apps/realtime/tokens.py`), emitido por `POST /api/v1/realtime/ws-token/` (`apps/realtime/views.py::WebSocketTokenView`) — un endpoint HTTP normal protegido con `IsAuthenticated`, que se llama ya autenticado (Basic Auth o sesión) antes de abrir el WebSocket, porque el handshake de WebSocket no puede mandar el header `Authorization`. El token vive en el caché de Django (Redis), expira solo a los `WS_TOKEN_TTL_SECONDS = 30` segundos, y se borra en cuanto se usa una vez.
+  - El cliente lo manda como query param al conectar: `ws://localhost:8000/ws/greenhouses/<id>/?token=<token>`.
+  - `GreenhouseConsumer.connect()` (`apps/realtime/consumers.py`) valida el token con `_authenticate()`; si falta, ya expiró o ya se usó, cierra la conexión con código **4401**.
+  - Si el token es válido pero el usuario no tiene `Membership` en ese invernadero (y no es staff), `_user_can_view()` lo detecta y cierra con código **4403**. El criterio de autorización es el mismo que `IsGreenhouseMember` para lectura: cualquier rol (Owner, Operator o Viewer) alcanza.
+  - Además de esto, sigue existiendo la validación de **origen** (`AllowedHostsOriginValidator`), activa solo cuando `DEBUG=False`.
+- **Al conectar** (una vez pasada la autenticación): el servidor manda inmediatamente un evento `snapshot` con el último valor conocido de cada sensor activo (leído de Redis, no de PostgreSQL) y el estado actual de cada actuador activo del invernadero — así el cliente no arranca "en blanco".
 - **Formato de todos los mensajes** (mismo sobre para cualquier evento):
 ```json
 {
@@ -808,13 +829,25 @@ Códigos que realmente puede producir la API (no una lista genérica):
 | `sensor_reading` | Llega una lectura aceptada por `/readings/ingest/` (se haya guardado en PostgreSQL o no) | `{"sensor_id", "sensor_name", "sensor_type", "unit", "value", "timestamp", "persisted"}` |
 | `actuator_state_changed` | Un actuador cambia de estado de verdad (no si ya estaba en ese estado) | `{"actuator_id", "name", "greenhouse_id", "state", "changed_by", "source"}` |
 
-- **Reconexión**: no identificado en el código — es responsabilidad del cliente; el backend no manda ningún mensaje de "resume" ni conserva mensajes perdidos durante una desconexión (al reconectar simplemente vuelves a recibir un `snapshot` fresco).
-- **Errores**: el consumer no envía mensajes de error estructurados; una conexión rechazada por origen inválido (en producción) se cierra a nivel de protocolo WebSocket, no con un mensaje JSON.
+- **Reconexión**: no identificado en el código — es responsabilidad del cliente; el backend no manda ningún mensaje de "resume" ni conserva mensajes perdidos durante una desconexión (al reconectar simplemente vuelves a recibir un `snapshot` fresco). Como el token es de un solo uso, cada reconexión necesita pedir un token nuevo con `POST /api/v1/realtime/ws-token/`.
+- **Errores**: el consumer no envía mensajes de error estructurados; una conexión rechazada se cierra a nivel de protocolo WebSocket con un código de cierre (**4401** sin token/token inválido, **4403** sin permiso sobre el invernadero), no con un mensaje JSON. Una conexión rechazada por origen inválido (en producción) también se cierra a nivel de protocolo.
 
 Ejemplo mínimo de conexión desde JavaScript:
 
 ```javascript
-const ws = new WebSocket("ws://localhost:8000/ws/greenhouses/1/");
+// 1) Pedir un token de un solo uso (ya autenticado por HTTP)
+const res = await fetch("/api/v1/realtime/ws-token/", {
+  method: "POST",
+  credentials: "include", // o el header Authorization/Basic que use tu cliente
+});
+const { token } = await res.json();
+
+// 2) Conectar el WebSocket con el token en la URL
+const ws = new WebSocket(`ws://localhost:8000/ws/greenhouses/1/?token=${token}`);
+ws.onclose = (event) => {
+  if (event.code === 4401) { /* token ausente/expirado/ya usado: pedir uno nuevo */ }
+  if (event.code === 4403) { /* usuario sin Membership en este invernadero */ }
+};
 ws.onmessage = (msg) => {
   const { event, timestamp, payload } = JSON.parse(msg.data);
   if (event === "snapshot") { /* estado inicial */ }
@@ -874,9 +907,13 @@ Lo que haría falta definir para desplegar en producción (no existe en el proye
 
 ## CORS y frontend
 
-**No identificado en el código**: no hay `django-cors-headers` en `requirements.txt`, ni `CORS_ALLOWED_ORIGINS`/`CORS_ALLOW_ALL_ORIGINS` ni middleware de CORS alguno en `config/settings/base.py` o `dev.py`.
+**CORS configurado** mediante `django-cors-headers==4.9.0` (`requirements.txt`):
 
-Esto significa, en la práctica: **hoy, un frontend corriendo en un origen distinto (por ejemplo `http://localhost:5173` durante desarrollo, o cualquier dominio en producción) no va a poder llamar a esta API desde el navegador** — el navegador bloqueará las peticiones por la política de mismo origen, porque el backend no manda los headers `Access-Control-Allow-Origin` necesarios. Esto habrá que resolverlo (típicamente agregando `django-cors-headers` y configurándolo) antes de que el frontend pueda consumir la API desde un origen distinto al del propio backend.
+- `"corsheaders"` está en `INSTALLED_APPS` y `"corsheaders.middleware.CorsMiddleware"` en `MIDDLEWARE` (`config/settings/base.py`), colocado justo después de `SecurityMiddleware` y antes de `SessionMiddleware`/`CommonMiddleware` (requisito del propio middleware de CORS).
+- `CORS_ALLOWED_ORIGINS` se lee de la variable de entorno `CORS_ALLOWED_ORIGINS` (`env.list(...)`), con **default vacío** — mismo criterio "fallar cerrado" que ya usa el proyecto para `DEBUG`/`ALLOWED_HOSTS`: si no configuras nada, ningún origen distinto puede llamar a la API. `.env.example` trae de ejemplo `CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173` (Vite por defecto).
+- `CORS_ALLOW_CREDENTIALS = True` — permite mandar cookies de sesión entre orígenes, seguro aquí porque `CORS_ALLOWED_ORIGINS` es una lista explícita, nunca un wildcard (`CORS_ALLOW_ALL_ORIGINS` no se usa).
+
+En la práctica: para que un frontend en otro origen (por ejemplo `http://localhost:5173` en desarrollo) pueda llamar a la API desde el navegador, su origen debe estar en `CORS_ALLOWED_ORIGINS` — si no, el navegador seguirá bloqueando las peticiones por la política de mismo origen.
 
 Aparte de ese punto — que es un bloqueante real, no un detalle — esto es lo que el frontend necesita saber hoy:
 
@@ -885,7 +922,7 @@ Aparte de ese punto — que es un bloqueante real, no un detalle — esto es lo 
 - **Autenticación**: Basic Auth (usuario/contraseña en cada petición) o cookie de sesión tras iniciar sesión — no hay token JWT que guardar en `localStorage`. Si el frontend usa Basic Auth, el usuario y contraseña deben mandarse en cada petición.
 - **Headers requeridos**: `Content-Type: application/json` en los `POST`/`PUT`/`PATCH`; `Authorization: Basic ...` para autenticarse.
 - **Formato de errores**: DRF estándar — un diccionario `{campo: [mensajes]}` en `400`, `{"detail": "mensaje"}` en `401`/`403`/`404`.
-- **WebSocket**: `ws://localhost:8000/ws/greenhouses/<id>/` (o `wss://` en producción), sin autenticación a nivel de conexión hoy (ver [Observaciones](#observaciones--pendientes)).
+- **WebSocket**: `ws://localhost:8000/ws/greenhouses/<id>/?token=<token>` (o `wss://` en producción), con token de un solo uso obtenido antes vía `POST /api/v1/realtime/ws-token/` (ver [WebSockets](#websockets--tiempo-real)).
 - **Paginación**: por número de página (`?page=`) en la mayoría de los endpoints (`PageNumberPagination`, `PAGE_SIZE=20`); por cursor (`?cursor=`) específicamente en `/readings/` — no se puede saltar a una página arbitraria ahí, solo avanzar/retroceder con el `next`/`previous` que trae la respuesta.
 
 ---
@@ -947,7 +984,7 @@ No hay tests implementados. Cada app tiene un `tests.py` generado por `startapp`
 - **`Timeout reading from redis` / `Connection lost` en el WebSocket** — el servicio `redis` no está disponible o no terminó su healthcheck todavía. Confirma con `docker compose ps` que `redis` está `healthy`, y que `REDIS_URL`/`REDIS_CACHE_URL` apuntan al host correcto (`redis`, el nombre del servicio, no `localhost`, cuando corres dentro de Docker).
 - **`relation "..." does not exist`** — falta aplicar migraciones de alguna app nueva. Corre `python manage.py migrate`; si el modelo es nuevo y no tiene migración todavía, primero `python manage.py makemigrations <app>`.
 - **`AssertionError: basename argument not specified...` al registrar rutas** — un ViewSet usado con `router.register(..., ViewSet)` sin `basename` explícito necesita un atributo `queryset` de clase (aunque el `get_queryset()` real sea otro, como en varios ViewSets de este proyecto) para que DRF pueda inferir el nombre de las rutas.
-- **CORS / el frontend no puede llamar a la API desde el navegador** — no está configurado (ver [CORS y frontend](#cors-y-frontend)); hay que agregarlo antes de conectar un frontend en otro origen.
+- **CORS bloquea al frontend (`Access-Control-Allow-Origin` faltante)** — el origen del frontend no está en `CORS_ALLOWED_ORIGINS` (variable de entorno); agrégalo y reinicia el contenedor `web` (ver [CORS y frontend](#cors-y-frontend)).
 - **Puerto ocupado (`8000` o `5432`)** — otro proceso ya está usando ese puerto en tu máquina; cambia el mapeo de puertos en `docker-compose.yml` o cierra el proceso que lo esté usando.
 - **`DJANGO_SECRET_KEY` / variables de Postgres faltantes** — Django se niega a arrancar (no tienen valor por defecto). Revisa que tu `.env` exista y tenga todas las variables marcadas como obligatorias en la tabla de [Variables de entorno](#variables-de-entorno).
 - **Ingesta rechaza todas las lecturas con "El timestamp está demasiado atrasado/adelantado"** — el reloj del dispositivo que envía los datos está desincronizado respecto al servidor por más de la tolerancia configurada (5 minutos adelante / 7 días atrás).
@@ -966,14 +1003,14 @@ Medidas que **sí** están implementadas en el código:
 - **Secretos fuera del código**: `SECRET_KEY`, credenciales de base de datos y URLs de Redis se leen del entorno (`django-environ`), nunca están escritos en el código fuente; `.env` está excluido de Git y de la imagen Docker.
 - **Contenedor sin root**: el `Dockerfile` crea y usa un usuario no-privilegiado (`appuser`) para correr la aplicación.
 - **Validación de rango físico en lecturas**: rechaza valores absurdos según `valid_min`/`valid_max` del tipo de sensor.
+- **CORS con allowlist explícita**: `django-cors-headers`, con `CORS_ALLOWED_ORIGINS` leído del entorno y default vacío (nada permitido hasta configurarlo explícitamente); ver [CORS y frontend](#cors-y-frontend).
+- **Autenticación en el WebSocket**: token de un solo uso, de vida corta (`WS_TOKEN_TTL_SECONDS = 30`), emitido por un endpoint HTTP protegido con `IsAuthenticated`, más autorización por `Membership` sobre el invernadero al conectar; ver [WebSockets](#websockets--tiempo-real).
 
 Lo que **no** está implementado (constatado por ausencia en el código, no una opinión):
 
-- **CORS**: no configurado (ver [CORS y frontend](#cors-y-frontend)).
-- **Rate limiting / throttling**: no hay `DEFAULT_THROTTLE_CLASSES` ni `DEFAULT_THROTTLE_RATES` en `REST_FRAMEWORK`; nada limita cuántas peticiones por minuto puede mandar un cliente (ni de login, ni de ingesta).
+- **Rate limiting / throttling**: no hay `DEFAULT_THROTTLE_CLASSES` ni `DEFAULT_THROTTLE_RATES` en `REST_FRAMEWORK`; nada limita cuántas peticiones por minuto puede mandar un cliente (ni de login, ni de ingesta), incluyendo `POST /api/v1/realtime/ws-token/`.
 - **HTTPS**: no hay `SECURE_SSL_REDIRECT`, `SESSION_COOKIE_SECURE` ni configuración similar en `base.py`/`dev.py` — depende enteramente de cómo se despliegue en producción (fuera del alcance de este código).
-- **Autenticación en el WebSocket**: ninguna (ver [WebSockets](#websockets--tiempo-real)) — cualquiera que sepa o adivine un `greenhouse_id` puede conectarse y recibir sus eventos en tiempo real, sin necesidad de token ni sesión.
-- **JWT / tokens de acceso**: no implementado; la única forma de autenticarse como usuario es Basic Auth o sesión de Django.
+- **JWT / tokens de acceso para la API HTTP**: no implementado; la única forma de autenticarse como usuario contra la API REST es Basic Auth o sesión de Django (el token de un solo uso descrito arriba es exclusivo del handshake de WebSocket, no reemplaza la autenticación HTTP).
 - **Registro de usuarios / recuperación de contraseña**: no implementado.
 
 ---
@@ -981,7 +1018,7 @@ Lo que **no** está implementado (constatado por ausencia en el código, no una 
 ## Checklist para desarrollar el frontend
 
 - [ ] **URL base**: `http://localhost:8000/api/v1/` en desarrollo (producción: no identificado en el código, defínela cuando exista un despliegue real).
-- [ ] **Resolver CORS primero**: hoy no está configurado; sin esto, el navegador bloqueará las llamadas desde un frontend en otro origen.
+- [ ] **CORS**: el origen del frontend debe estar en `CORS_ALLOWED_ORIGINS` (variable de entorno del backend, no del frontend) — pídele al equipo de backend que agregue tu origen si el navegador bloquea las llamadas.
 - [ ] **Autenticación**: Basic Auth (usuario + contraseña en cada petición) o sesión de Django. No hay JWT — no hay token que renovar ni guardar de forma especial; si usas Basic Auth, decide cómo vas a guardar/enviar la contraseña de forma segura en el cliente.
 - [ ] **Cómo iniciar sesión**: no hay endpoint de login de API dedicado más allá de `/api-auth/login/` (pensado para navegar la API en desarrollo, con `SessionAuthentication`). Para un frontend real, lo disponible hoy es mandar `Authorization: Basic ...` en cada petición.
 - [ ] **Endpoints disponibles**: ver [API completa](#api-completa) — invernaderos, zonas, tipos de sensor, dispositivos, sensores, tipos de actuador, actuadores (+ acción `state` y `history`), lecturas (+ `ingest` y `export`), membresías.
@@ -989,7 +1026,7 @@ Lo que **no** está implementado (constatado por ausencia en el código, no una 
 - [ ] **Formato de request/response**: JSON estándar; ver ejemplos reales en cada endpoint de la sección [API completa](#api-completa).
 - [ ] **Manejo de errores**: `{detail: "..."}` para permisos/autenticación/no-encontrado; `{campo: ["..."]}` para validación. Ver [Manejo de errores](#manejo-de-errores).
 - [ ] **Paginación**: por página (`?page=`) casi en todo; por cursor (`?cursor=`, solo avance/retroceso) en `/readings/`.
-- [ ] **WebSocket**: `ws://localhost:8000/ws/greenhouses/<id>/`; conecta uno por invernadero que el usuario esté viendo; escucha los eventos `snapshot`, `sensor_reading`, `actuator_state_changed` (ver [WebSockets](#websockets--tiempo-real)). Hoy no requiere ni valida ningún tipo de token al conectar.
+- [ ] **WebSocket**: primero `POST /api/v1/realtime/ws-token/` (autenticado) para obtener un token de un solo uso, luego conectar a `ws://localhost:8000/ws/greenhouses/<id>/?token=<token>`; conecta uno por invernadero que el usuario esté viendo; escucha los eventos `snapshot`, `sensor_reading`, `actuator_state_changed` (ver [WebSockets](#websockets--tiempo-real)). El token expira en 30s y es de un solo uso, así que pide uno nuevo justo antes de cada conexión/reconexión.
 - [ ] **Roles**: el frontend debería ocultar/deshabilitar acciones de escritura según el rol del usuario en cada invernadero (Owner/Operator/Viewer) — el backend las rechaza igual (`403`), pero conviene reflejarlo en la interfaz para no ofrecer botones que van a fallar.
 - [ ] **Variables de entorno del frontend**: no identificado en el código (este repositorio es solo el backend).
 - [ ] **Diferencias desarrollo/producción**: hoy solo existe configuración de desarrollo; cuando exista un entorno de producción, la URL base, el esquema (`wss://` para WebSocket) y probablemente la forma de autenticarse deberán actualizarse.
@@ -1000,10 +1037,10 @@ Lo que **no** está implementado (constatado por ausencia en el código, no una 
 
 Cosas que valen la pena que sepas antes de construir el frontend o de llevar esto a producción — constatadas leyendo el código, no opiniones sobre cómo "debería" estar hecho.
 
-- **Sin CORS configurado** (`apps/`, `config/settings/`) — ningún frontend en otro origen podrá llamar a la API desde el navegador hasta que se agregue `django-cors-headers` (o equivalente) y se configure.
-- **WebSocket sin autenticación ni autorización** (`apps/realtime/consumers.py::GreenhouseConsumer.connect`) — cualquiera que conozca o adivine un `greenhouse_id` puede conectarse y recibir sus lecturas/eventos en tiempo real, sin sesión ni token. La única protección (validación de `Origin`) solo se activa en producción (`DEBUG=False`), nunca hoy en desarrollo.
-- **`apps/actuators/permissions.py::CanControlActuators` es código muerto** — la clase sigue en el archivo (con un docstring que dice "marcador de posición hasta la Etapa 12"), pero `ActuatorViewSet` ya no la importa ni la usa; fue reemplazada por `IsGreenhouseOperatorOrAbove` de `apps/memberships/permissions.py`. No rompe nada, pero puede confundir a quien lea el código pensando que sigue activa.
-- **`REDIS_CACHE_URL` no está documentada en `.env.example`** — existe como variable en `config/settings/base.py` con un valor por defecto (`redis://redis:6379/1`), pero no aparece listada junto a `REDIS_URL` en la plantilla de entorno, así que es fácil no darse cuenta de que existe.
+- ~~Sin CORS configurado~~ — **resuelto**: `django-cors-headers` agregado y configurado con allowlist explícita (`CORS_ALLOWED_ORIGINS`, default vacío); ver [CORS y frontend](#cors-y-frontend). Falta que quien despliegue en producción agregue ahí el origen real del frontend.
+- ~~WebSocket sin autenticación ni autorización~~ — **resuelto**: `GreenhouseConsumer.connect()` ahora exige un token de un solo uso emitido por `POST /api/v1/realtime/ws-token/` y valida `Membership` sobre el invernadero; ver [WebSockets](#websockets--tiempo-real).
+- **`apps/actuators/permissions.py::CanControlActuators` — resuelto/limpiado**: el archivo ya no contiene la clase, solo un comentario explicando por qué quedó sin uso (fue reemplazada por `IsGreenhouseOperatorOrAbove` de `apps/memberships/permissions.py`) y el comando para borrar el archivo por completo cuando quieras (`del apps\actuators\permissions.py` en Windows / `rm apps/actuators/permissions.py` en Linux/Mac). Nada en el proyecto lo importa.
+- ~~`REDIS_CACHE_URL` no está documentada en `.env.example`~~ — **resuelto**: ya aparece listada junto a `REDIS_URL` en `.env.example`, con comentario.
 - **No hay endpoint de registro ni de login de API "real"** — crear usuarios depende de `createsuperuser`/shell/admin; no hay forma de que un cliente se registre por sí mismo, ni de recuperar contraseña.
 - **Invitar a un usuario a un invernadero requiere su `id` numérico** (`POST /api/v1/memberships/`, campo `user`) — no hay forma de invitar por `username` o email desde la API; hay que consultarlo aparte (hoy, por shell o admin).
 - **El `Dockerfile` sigue usando el servidor de desarrollo de Django** (`CMD ["python", "manage.py", "runserver", ...]`) — un comentario en el propio archivo dice *"Lo cambiaremos por Daphne (servidor ASGI) en la Etapa 7"*, pero el `CMD` no se actualizó; en la práctica funciona porque `runserver` delega en Daphne automáticamente al detectar `channels`/`ASGI_APPLICATION`, pero Django sigue emitiendo la advertencia de que no es apto para producción.
