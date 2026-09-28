@@ -427,8 +427,23 @@ Configurado en `REST_FRAMEWORK` dentro de `config/settings/base.py`. Existen **d
 
 - **BasicAuthentication**: usuario y contraseña en cada petición (header `Authorization: Basic <base64(usuario:contraseña)>`). Es lo que se usa para probar la API con Postman o desde un script.
 - **SessionAuthentication**: usa la cookie de sesión de Django. Permite navegar la API desde el navegador después de iniciar sesión en `/admin/` o en `/api-auth/login/` (esta última ruta, montada en `config/urls.py`, es explícitamente solo para navegar la API en desarrollo — no la usa Postman ni un frontend real).
-- **No hay JWT, ni tokens de acceso/refresh, ni verificación de email, ni recuperación de contraseña.** `apps/users/views.py` existe pero está vacío (solo el `# Create your views here.` que deja `startapp`); no hay endpoint de registro público.
-- **Creación de usuarios**: únicamente vía `python manage.py createsuperuser` o el panel `/admin/` (con un usuario staff ya existente). No hay forma de que alguien se registre por sí mismo a través de la API.
+- **No hay JWT, ni tokens de acceso/refresh, ni verificación de email, ni recuperación de contraseña.**
+- **Registro público**: `POST /api/v1/auth/register/` (`apps/users/views.py::RegisterView`) — endpoint público (`AllowAny`, sin autenticación previa) para que un usuario nuevo cree su propia cuenta, sin depender de `createsuperuser`/admin. La contraseña se valida con las mismas 4 reglas de `AUTH_PASSWORD_VALIDATORS` que ya usaba el admin (similitud con datos del usuario, longitud mínima, contraseñas comunes, no-solo-numérica). No crea ninguna `Membership` ni invernadero — eso pasa después, cuando el usuario crea su propio invernadero (se vuelve Owner automáticamente) o alguien lo invita a uno existente.
+
+  **Request**:
+  ```json
+  { "username": "nuevo_cliente", "email": "nuevo@ejemplo.com", "password": "unaContraseñaSegura123" }
+  ```
+  (`email` es opcional; `username` y `password` son obligatorios.)
+
+  **Response 201**:
+  ```json
+  { "id": 8, "username": "nuevo_cliente", "email": "nuevo@ejemplo.com" }
+  ```
+  **Errores**: `400` si `username` ya existe, si `email` ya existe (aunque el modelo de Django no lo exige único por defecto, este endpoint sí lo valida), o si la contraseña no pasa las validaciones (ej. `{"password": ["Esta contraseña es demasiado común."]}`).
+
+  Comparte el `AnonRateThrottle` global (`60/minute` por IP, ver [Seguridad](#seguridad)) — no tiene un límite propio.
+- **Creación de usuarios de staff/admin**: sigue siendo únicamente vía `python manage.py createsuperuser` o el panel `/admin/` — el registro público de arriba nunca crea usuarios `is_staff`.
 - Por defecto (`IsAuthenticated`), **todo** endpoint exige estar autenticado, salvo que la vista lo declare explícitamente distinto.
 
 Ejemplo de cómo debe autenticarse el frontend (Basic Auth, que es lo único disponible hoy):
@@ -729,15 +744,23 @@ Genera un archivo `.xlsx` con las lecturas del rango pedido.
 #### `GET/POST /api/v1/memberships/`, `GET/PUT/PATCH/DELETE /api/v1/memberships/{id}/`
 Quién tiene acceso a qué invernadero. Solo el Owner del invernadero en cuestión (o staff) puede **ver, crear o borrar** sus membresías — el queryset ya viene filtrado a "invernaderos donde soy Owner", así que un no-Owner recibe `404` (no `403`) al intentar acceder a una membership que no puede ni ver.
 
-**Request (POST, requiere el `id` numérico del usuario)**:
+**Request (POST) — dos formas de decir a quién invitas**:
+
+Por `id` numérico del usuario (como antes):
 ```json
 { "user": 4, "greenhouse": 1, "role": "operator" }
 ```
-**Response 201**:
+Por `username` o `email` (`invite`, sin necesitar el id):
+```json
+{ "invite": "cliente1", "greenhouse": 1, "role": "operator" }
+```
+Si mandas ambos, `user` gana. Si no mandas ninguno, `400` con `{"user": ["Manda 'user' (id numérico) o 'invite' (username o email)..."]}`. Si `invite` no coincide con ningún usuario, `400` con `{"invite": ["No existe ningún usuario con username o email '...'."]}`.
+
+**Response 201** (igual en ambos casos):
 ```json
 { "id": 7, "user": 4, "username": "cliente1", "greenhouse": 1, "role": "operator", "created_at": "2026-09-21T12:00:00Z" }
 ```
-**Errores**: `403` si no eres Owner (al intentar crear/borrar sabiendo el id de un invernadero ajeno donde tampoco eres miembro); `404` si el recurso no está en tu queryset visible.
+**Errores**: `400` si no se puede resolver a qué usuario invitar (ver arriba); `403` si no eres Owner (al intentar crear/borrar sabiendo el id de un invernadero ajeno donde tampoco eres miembro); `404` si el recurso no está en tu queryset visible.
 
 ---
 
@@ -770,6 +793,7 @@ Códigos que realmente puede producir la API (no una lista genérica):
 | `401 Unauthorized` | Sin credenciales o credenciales inválidas (Basic/Session) |
 | `403 Forbidden` | Autenticado pero sin el rol/permiso necesario (ej. no ser Owner para escribir, no ser Operator+ para controlar un actuador) |
 | `404 Not Found` | Recurso que no existe, o que existe pero no está en tu queryset visible (multi-tenant) |
+| `429 Too Many Requests` | Se superó el rate limit (`AnonRateThrottle`/`UserRateThrottle`/`DeviceRateThrottle`, ver [Seguridad](#seguridad)). Trae el header `Retry-After` con los segundos a esperar. |
 | `500 Internal Server Error` | No documentado explícitamente en el código como manejado — cualquier excepción no capturada cae aquí (comportamiento por defecto de Django/DRF) |
 
 ---
@@ -865,7 +889,7 @@ ws.onmessage = (msg) => {
 | Servicio | Imagen | Qué hace | Puertos | Persistencia |
 |---|---|---|---|---|
 | `db` | `postgres:18` | Base de datos | `127.0.0.1:5432:5432` (solo accesible desde tu propia máquina, para un cliente SQL) | Volumen nombrado `postgres_data` → `/var/lib/postgresql` |
-| `redis` | `redis:8-alpine` | Channel layer de WebSockets + caché de Django | No expuesto al host | **Sin volumen** — los datos de Redis son efímeros; si el contenedor se reinicia, se pierden (aceptable: son cachés reconstruibles, no la fuente de verdad) |
+| `redis` | `redis:8-alpine` | Channel layer de WebSockets + caché de Django | No expuesto al host | **Con volumen** (`redis_data:/data`) — los snapshots RDB que Redis ya guarda por su cuenta ahora sobreviven aunque se recree el contenedor (`down`/`up --build`), no solo un `restart`. Sigue siendo un caché reconstruible (no la fuente de verdad; las lecturas ya guardadas viven en PostgreSQL), pero perder el "último valor conocido" de cada sensor en cada rebuild era una molestia innecesaria en desarrollo. |
 | `web` | Construida desde `Dockerfile` | Django/DRF/Channels servido por Daphne (vía `runserver`) | `8000:8000` | Código montado en vivo desde tu carpeta local (`.:/app`) — editas y Django recarga solo |
 
 `web` espera (`depends_on: condition: service_healthy`) a que `db` y `redis` pasen su `healthcheck` antes de arrancar.
@@ -1005,13 +1029,13 @@ Medidas que **sí** están implementadas en el código:
 - **Validación de rango físico en lecturas**: rechaza valores absurdos según `valid_min`/`valid_max` del tipo de sensor.
 - **CORS con allowlist explícita**: `django-cors-headers`, con `CORS_ALLOWED_ORIGINS` leído del entorno y default vacío (nada permitido hasta configurarlo explícitamente); ver [CORS y frontend](#cors-y-frontend).
 - **Autenticación en el WebSocket**: token de un solo uso, de vida corta (`WS_TOKEN_TTL_SECONDS = 30`), emitido por un endpoint HTTP protegido con `IsAuthenticated`, más autorización por `Membership` sobre el invernadero al conectar; ver [WebSockets](#websockets--tiempo-real).
+- **Rate limiting básico**: `REST_FRAMEWORK["DEFAULT_THROTTLE_CLASSES"]` aplica `AnonRateThrottle` (`60/minute`, por IP) y `UserRateThrottle` (`300/minute`, por usuario autenticado) a toda la API por defecto — cubre `POST /api/v1/realtime/ws-token/` y cualquier intento de fuerza bruta contra Basic Auth. La ingesta de dispositivos (`POST /api/v1/readings/ingest/`) usa su propio throttle (`DeviceRateThrottle`, `120/minute` por dispositivo, `apps/sensors/throttling.py`) en vez del de usuario, porque ahí `request.user` siempre es `AnonymousUser` (se autentica por `X-Device-Key`, no como usuario) — con los throttles estándar, todos los dispositivos detrás de la misma IP (ej. varios ESP32 en la misma red) compartirían un solo límite en vez de tener cada uno el suyo.
 
 Lo que **no** está implementado (constatado por ausencia en el código, no una opinión):
 
-- **Rate limiting / throttling**: no hay `DEFAULT_THROTTLE_CLASSES` ni `DEFAULT_THROTTLE_RATES` en `REST_FRAMEWORK`; nada limita cuántas peticiones por minuto puede mandar un cliente (ni de login, ni de ingesta), incluyendo `POST /api/v1/realtime/ws-token/`.
 - **HTTPS**: no hay `SECURE_SSL_REDIRECT`, `SESSION_COOKIE_SECURE` ni configuración similar en `base.py`/`dev.py` — depende enteramente de cómo se despliegue en producción (fuera del alcance de este código).
 - **JWT / tokens de acceso para la API HTTP**: no implementado; la única forma de autenticarse como usuario contra la API REST es Basic Auth o sesión de Django (el token de un solo uso descrito arriba es exclusivo del handshake de WebSocket, no reemplaza la autenticación HTTP).
-- **Registro de usuarios / recuperación de contraseña**: no implementado.
+- ~~Registro de usuarios~~ — **resuelto**: `POST /api/v1/auth/register/`, ver [Autenticación](#autenticación). **Recuperación de contraseña sigue sin implementar** — no hay envío de email en el proyecto (ni configuración de `EMAIL_BACKEND`), así que un flujo de "olvidé mi contraseña" quedaría fuera del alcance actual sin agregar esa pieza primero.
 
 ---
 
@@ -1042,11 +1066,11 @@ Cosas que valen la pena que sepas antes de construir el frontend o de llevar est
 - **`apps/actuators/permissions.py::CanControlActuators` — resuelto/limpiado**: el archivo ya no contiene la clase, solo un comentario explicando por qué quedó sin uso (fue reemplazada por `IsGreenhouseOperatorOrAbove` de `apps/memberships/permissions.py`) y el comando para borrar el archivo por completo cuando quieras (`del apps\actuators\permissions.py` en Windows / `rm apps/actuators/permissions.py` en Linux/Mac). Nada en el proyecto lo importa.
 - ~~`REDIS_CACHE_URL` no está documentada en `.env.example`~~ — **resuelto**: ya aparece listada junto a `REDIS_URL` en `.env.example`, con comentario.
 - **No hay endpoint de registro ni de login de API "real"** — crear usuarios depende de `createsuperuser`/shell/admin; no hay forma de que un cliente se registre por sí mismo, ni de recuperar contraseña.
-- **Invitar a un usuario a un invernadero requiere su `id` numérico** (`POST /api/v1/memberships/`, campo `user`) — no hay forma de invitar por `username` o email desde la API; hay que consultarlo aparte (hoy, por shell o admin).
+- ~~Invitar a un usuario a un invernadero requiere su `id` numérico~~ — **resuelto**: `POST /api/v1/memberships/` ahora también acepta `invite` (`username` o `email`) en vez de `user`; ver [Membresías](#membresías-appsmemberships).
 - **El `Dockerfile` sigue usando el servidor de desarrollo de Django** (`CMD ["python", "manage.py", "runserver", ...]`) — un comentario en el propio archivo dice *"Lo cambiaremos por Daphne (servidor ASGI) en la Etapa 7"*, pero el `CMD` no se actualizó; en la práctica funciona porque `runserver` delega en Daphne automáticamente al detectar `channels`/`ASGI_APPLICATION`, pero Django sigue emitiendo la advertencia de que no es apto para producción.
 - **No hay `prod.py`, ni Dockerfile/compose de producción** — ver [Producción](#producción).
-- **Redis no tiene volumen persistente** en `docker-compose.yml` — si el contenedor se reinicia, se pierde el "último valor conocido" de cada sensor (el snapshot que ve un cliente al conectarse) y el estado de la política de persistencia (aunque no las lecturas ya guardadas en PostgreSQL, que sí persisten).
-- **Sin rate limiting** en ningún endpoint, incluida la ingesta de lecturas y el login — un dispositivo mal configurado (o un ataque) podría mandar peticiones sin límite alguno.
+- ~~Redis no tiene volumen persistente~~ — **resuelto**: `docker-compose.yml` ahora monta `redis_data:/data`, así que el "último valor conocido" de cada sensor y el estado de la política de persistencia sobreviven aunque se recree el contenedor (`down`/`up --build`), no solo un `restart`. Sigue siendo un caché reconstruible, no la fuente de verdad — las lecturas ya guardadas en PostgreSQL nunca dependieron de esto.
+- ~~Sin rate limiting~~ — **resuelto**: `AnonRateThrottle`/`UserRateThrottle` en toda la API (`60/minute`, `300/minute`) y `DeviceRateThrottle` propio para la ingesta (`120/minute` por dispositivo); ver [Seguridad](#seguridad). Los números son un punto de partida razonable, no medidos contra tráfico real — ajústalos en `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` (`config/settings/base.py`) si en la práctica resultan muy estrictos o muy laxos.
 - **Sin tests automatizados** en ninguna app.
 
 ---

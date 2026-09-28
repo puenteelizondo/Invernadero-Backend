@@ -21,6 +21,15 @@ services:
 
   redis:
     image: redis:8-alpine
+    volumes:
+      # La imagen de Redis ya guarda snapshots RDB periódicos en /data por
+      # su cuenta (lo ves en los logs: "Loading RDB produced by..."), pero
+      # sin este volumen esos snapshots viven solo en la capa temporal del
+      # contenedor: sobreviven un `restart`, pero se pierden con un `down`
+      # o un `up --build` que lo recree. Con el volumen, el "último valor
+      # conocido" de cada sensor y el estado de la política de persistencia
+      # sobreviven aunque se recree el contenedor por completo.
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -43,3 +52,4 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:

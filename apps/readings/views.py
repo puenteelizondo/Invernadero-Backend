@@ -9,6 +9,7 @@ from apps.memberships.permissions import IsGreenhouseMember
 from apps.memberships.scoping import visible_greenhouse_ids
 from apps.sensors.authentication import DeviceKeyAuthentication
 from apps.sensors.permissions import IsDeviceAuthenticated
+from apps.sensors.throttling import DeviceRateThrottle
 
 from .exports import build_readings_xlsx
 from .filters import ReadingFilter
@@ -39,6 +40,11 @@ class ReadingViewSet(GreenhouseScopedMixin, viewsets.ReadOnlyModelViewSet):
 class ReadingIngestView(APIView):
     authentication_classes = [DeviceKeyAuthentication]
     permission_classes = [IsDeviceAuthenticated]
+    # Throttle propio por dispositivo, no el UserRateThrottle/AnonRateThrottle
+    # global (ver apps/sensors/throttling.py) -- request.user aquí siempre es
+    # AnonymousUser, así que esos throttles agruparían por IP, no por
+    # dispositivo.
+    throttle_classes = [DeviceRateThrottle]
 
     def post(self, request):
         device = request.auth

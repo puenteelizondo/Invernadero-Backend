@@ -156,6 +156,22 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
+    # Rate limiting básico: nada limitaba cuántas peticiones por minuto
+    # podía mandar un cliente (ni la ingesta de lecturas, ni un login a
+    # fuerza bruta). AnonRateThrottle/UserRateThrottle cubren la API
+    # normal (agrupan por IP o por usuario autenticado); la ingesta de
+    # dispositivos usa su propio throttle por separado porque no se
+    # autentica como usuario (ver ReadingIngestView y
+    # apps/sensors/throttling.py::DeviceRateThrottle).
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "60/minute",
+        "user": "300/minute",
+        "device": "120/minute",
+    },
 }
 
 # --- Ingesta de lecturas -------------------------------------------
