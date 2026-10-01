@@ -39,6 +39,20 @@ CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
 # a diferencia de un comodín.
 CORS_ALLOW_CREDENTIALS = True
 
+# --- CSRF -----------------------------------------------------------
+# Distinto de CORS_ALLOWED_ORIGINS de arriba: CORS controla si el
+# NAVEGADOR deja que el frontend LEA la respuesta; CSRF_TRUSTED_ORIGINS
+# controla si DJANGO ACEPTA la petición en primer lugar cuando trae un
+# header Origin que no coincide con el host al que le está pegando
+# (típico al usar un proxy de desarrollo, como el de Vite: el navegador
+# manda Origin: http://localhost:5173 aunque la petición realmente
+# llegue -- vía el proxy -- a Django en localhost:8000). Sin esto,
+# CsrfViewMiddleware rechaza todo POST/PATCH/DELETE con
+# "CSRF Failed: Origin checking failed", aunque el header X-CSRFToken
+# y la cookie estén perfectamente bien. Mismo patrón que
+# CORS_ALLOWED_ORIGINS: lista blanca explícita, vacía por defecto.
+CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
+
 # --- Aplicaciones -----------------------------------------------------
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -174,6 +188,10 @@ REST_FRAMEWORK = {
         "rest_framework.filters.OrderingFilter",
     ],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    # Convierte el ProtectedError de Django (borrar algo que aún tiene
+    # elementos que dependen de él) en un 409 con mensaje claro en vez de
+    # un 500. Ver apps/common/exceptions.py.
+    "EXCEPTION_HANDLER": "apps.common.exceptions.custom_exception_handler",
     "PAGE_SIZE": 20,
     # Rate limiting básico: nada limitaba cuántas peticiones por minuto
     # podía mandar un cliente (ni la ingesta de lecturas, ni un login a

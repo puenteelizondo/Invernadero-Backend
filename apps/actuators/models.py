@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q
 from apps.common.realtime import publish_event
 
 
@@ -8,12 +9,28 @@ class ActuatorType(models.Model):
     Mismo patrón que SensorType: agregar un tipo nuevo es una fila,
     no un despliegue de código.
     """
-    code = models.SlugField(max_length=50, unique=True, help_text="Ej: 'fan'")
+    # Vacío = tipo GLOBAL (staff); con valor = tipo PROPIO de ese invernadero.
+    # Mismo esquema que SensorType; ver apps/common/types.py.
+    greenhouse = models.ForeignKey(
+        "greenhouses.Greenhouse", on_delete=models.CASCADE, null=True, blank=True,
+        related_name="actuator_types",
+        help_text="Vacío = tipo global. Con invernadero = solo visible para ese invernadero.",
+    )
+    code = models.SlugField(max_length=50, help_text="Ej: 'fan'")
     name = models.CharField(max_length=100, help_text="Ej: 'Ventilador'")
     description = models.TextField(blank=True)
 
     class Meta:
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["code"], condition=Q(greenhouse__isnull=True),
+                name="actuatortype_code_unique_global",
+            ),
+            models.UniqueConstraint(
+                fields=["greenhouse", "code"], name="actuatortype_code_unique_per_greenhouse",
+            ),
+        ]
 
     def __str__(self):
         return self.name

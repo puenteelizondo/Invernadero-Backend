@@ -1,14 +1,16 @@
 from rest_framework import serializers
 
+from apps.common.types import TypeCatalogSerializerMixin
+
 from .models import Device, Sensor, SensorType
 
 
-class SensorTypeSerializer(serializers.ModelSerializer):
+class SensorTypeSerializer(TypeCatalogSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = SensorType
         fields = [
-            "id", "code", "name", "default_unit",
-            "valid_min", "valid_max", "description",
+            "id", "greenhouse", "code", "name", "default_unit",
+            "valid_min", "valid_max", "description", "can_edit",
         ]
         read_only_fields = ["id"]
 
@@ -51,5 +53,11 @@ class SensorSerializer(serializers.ModelSerializer):
         if zone and greenhouse and zone.greenhouse_id != greenhouse.id:
             raise serializers.ValidationError(
                 {"zone": "La zona debe pertenecer al mismo invernadero que el sensor."}
+            )
+        # Un tipo propio de otro invernadero no se puede usar aquí (los globales sí).
+        sensor_type = attrs.get("sensor_type", getattr(self.instance, "sensor_type", None))
+        if sensor_type and greenhouse and sensor_type.greenhouse_id not in (None, greenhouse.id):
+            raise serializers.ValidationError(
+                {"sensor_type": "Ese tipo de sensor pertenece a otro invernadero."}
             )
         return attrs

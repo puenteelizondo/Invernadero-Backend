@@ -1,9 +1,10 @@
+from django.db import transaction
 from django.utils import timezone
-from rest_framework import viewsets
+from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
-from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
+from apps.common.types import TypeCatalogMixin
 from apps.memberships.mixins import GreenhouseScopedMixin
 from apps.memberships.permissions import IsGreenhouseMember, IsGreenhouseOperatorOrAbove
 
@@ -16,18 +17,14 @@ from .serializers import (
 )
 
 
-class ActuatorTypeViewSet(viewsets.ModelViewSet):
+class ActuatorTypeViewSet(TypeCatalogMixin, viewsets.ModelViewSet):
     """
-    Catálogo GLOBAL (igual que SensorType): lectura abierta a
-    cualquier autenticado, escritura solo para staff.
+    Catálogo de tipos de actuador, con los mismos dos ámbitos que
+    SensorType: globales (staff) y propios de un invernadero (su Owner).
     """
-    queryset = ActuatorType.objects.all()
+    queryset = ActuatorType.objects.select_related("greenhouse").all()
     serializer_class = ActuatorTypeSerializer
-
-    def get_permissions(self):
-        if self.action in ("create", "update", "partial_update", "destroy"):
-            return [IsAdminUser()]
-        return super().get_permissions()
+    filterset_fields = ["greenhouse"]
 
 
 class ActuatorViewSet(GreenhouseScopedMixin, viewsets.ModelViewSet):
@@ -75,3 +72,31 @@ class ActuatorViewSet(GreenhouseScopedMixin, viewsets.ModelViewSet):
         qs = actuator.state_history.select_related("changed_by")[:100]
         serializer = ActuatorStateHistorySerializer(qs, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=["post"], url_path="purge")
+    def purge(self, request, pk=None):
+        """
+        POST /api/v1/actuators/{id}/purge/   body: {"confirm_name": "<nombre exacto>"}
+
+        Borrado EXPLÍCITO e irreversible de un actuador junto con todo su
+        historial de cambios de estado. El DELETE normal se niega si hay
+        historial (ActuatorStateHistory.actuator es PROTECT); esta acción
+        sirve para limpiar actuadores de prueba o creados por error.
+
+        Solo el Owner del invernadero (get_object() aplica
+        IsGreenhouseMember: un POST exige rol Owner) y hay que mandar el
+        nombre exacto del actuador como confirmación.
+        """
+        actuator = self.get_object()
+        confirm = request.data.get("confirm_name") if hasattr(request.data, "get") else None
+        if not isinstance(confirm, str) or confirm.strip() != actuator.name:
+            raise serializers.ValidationError(
+                {"confirm_name": "Escribe el nombre exacto del actuador para confirmar."}
+            )
+
+        actuator_id, name = actuator.id, actuator.name
+        with transaction.atomic():
+            deleted, _ = actuator.state_history.all().delete()
+            actuator.delete()
+
+        return Response({"actuator_id": actuator_id, "name": name, "history_deleted": deleted})

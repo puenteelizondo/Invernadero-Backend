@@ -43,7 +43,7 @@ Construido con Django + Django REST Framework + Django Channels, sobre PostgreSQ
 
 **Base de datos.** PostgreSQL, con 6 apps de Django que se reparten los modelos: `users`, `greenhouses`, `sensors`, `actuators`, `readings`, `memberships`.
 
-**Autenticación.** DRF con `SessionAuthentication` + `BasicAuthentication` para usuarios; un esquema propio por API key (header `X-Device-Key`) para dispositivos físicos que solo envían lecturas. No hay JWT ni endpoints de registro/login propios (ver [Autenticación](#autenticación)).
+**Autenticación.** DRF con `SessionAuthentication` + `BasicAuthentication` para usuarios, más endpoints propios de registro (`/auth/register/`), login/logout de sesión con cookie + CSRF (`/auth/login/`, `/auth/logout/`, `/auth/csrf/`, `/auth/me/`) y recuperación de contraseña (`/auth/password-reset/`); un esquema propio por API key (header `X-Device-Key`) para dispositivos físicos que solo envían lecturas. No hay JWT (ver [Autenticación](#autenticación)).
 
 **API.** REST bajo `/api/v1/`, organizada por recurso: invernaderos, zonas, tipos de sensor, dispositivos, sensores, tipos de actuador, actuadores, lecturas, membresías.
 
@@ -139,7 +139,7 @@ publish_event() → Redis (channel layer) → todos los WebSocket conectados a e
 Invernadero-Backend/
 ├── apps/
 │   ├── actuators/        # Tipos de actuador, actuadores, historial de estado
-│   ├── common/            # Utilidad compartida: publish_event() (puente hacia WebSocket)
+│   ├── common/            # Utilidad compartida: publish_event() (puente hacia WebSocket) y manejador de excepciones (409)
 │   ├── greenhouses/       # Invernadero y Zona
 │   ├── memberships/       # Modelo multi-tenant: quién tiene qué rol en qué invernadero
 │   ├── readings/          # Lecturas: ingesta, consulta, exportación a Excel, política de persistencia
@@ -171,7 +171,7 @@ Cada app de `apps/` sigue el patrón estándar de Django (`models.py`, `views.py
 | `apps/actuators` | Catálogo de tipos de actuador, los actuadores y su historial de cambios de estado. |
 | `apps/memberships` | El modelo multi-tenant: quién (`User`) puede hacer qué (`Role`) en cuál invernadero (`Greenhouse`). Aporta los permisos y mixins que usan **todas** las demás apps para filtrar por invernadero. |
 | `apps/realtime` | El consumer de WebSocket y su enrutado (`routing.py`), importado desde `config/asgi.py`. |
-| `apps/common` | Un único archivo, `realtime.py`, con la función `publish_event()` — el único punto del código que sabe cómo hablar con el channel layer de Channels. |
+| `apps/common` | `realtime.py`, con la función `publish_event()` — el único punto del código que sabe cómo hablar con el channel layer de Channels — y `exceptions.py`, el manejador de excepciones de la API (convierte `ProtectedError` en `409`). |
 
 ---
 
@@ -313,11 +313,12 @@ erDiagram
 | `name` | CharField(100) | único junto con `greenhouse` |
 | `description` | TextField | opcional |
 
-**`sensors.SensorType`** — catálogo global de tipos de sensor (temperatura, humedad, etc.). Agregar un tipo nuevo es insertar una fila, no escribir código.
+**`sensors.SensorType`** — catálogo de tipos de sensor (temperatura, humedad, etc.) con dos alcances: **global** (`greenhouse` nulo, lo gestiona el staff y lo ven todos) o **propio de un invernadero** (lo crea su Owner y solo lo ven los miembros de ese invernadero). Agregar un tipo nuevo es insertar una fila, no escribir código.
 
 | Campo | Tipo | Notas |
 |---|---|---|
-| `code` | SlugField(50) | único, ej. `"temperature"` |
+| `greenhouse` | FK → Greenhouse | nulo = global; `CASCADE`; no se puede cambiar después de crear |
+| `code` | SlugField(50) | único entre los globales y único por invernadero (`UniqueConstraint`); un tipo propio no puede repetir el código de uno global. Ej. `"temperature"` |
 | `name` | CharField(100) | ej. `"Temperatura"` |
 | `default_unit` | CharField(20) | ej. `"°C"` |
 | `valid_min` / `valid_max` | FloatField | opcionales; rango físico plausible, usado para rechazar lecturas absurdas |
@@ -350,11 +351,12 @@ erDiagram
 | `persist_deadband` | FloatField | opcional; ver política de persistencia |
 | `config` | JSONField | default `{}`; configuración específica del tipo de sensor (calibración, pin, ganancia...) que no se filtra ni se consulta |
 
-**`actuators.ActuatorType`** — catálogo global de tipos de actuador (ventilador, bomba, válvula...). Mismo patrón que `SensorType`.
+**`actuators.ActuatorType`** — catálogo de tipos de actuador (ventilador, bomba, válvula...). Mismo patrón y mismos alcances que `SensorType`.
 
 | Campo | Tipo | Notas |
 |---|---|---|
-| `code` | SlugField(50) | único, ej. `"fan"` |
+| `greenhouse` | FK → Greenhouse | nulo = global (igual que `SensorType`) |
+| `code` | SlugField(50) | único entre globales y por invernadero, ej. `"fan"` |
 | `name` | CharField(100) | ej. `"Ventilador"` |
 | `description` | TextField | opcional |
 
@@ -472,16 +474,26 @@ Configurado en `REST_FRAMEWORK` dentro de `config/settings/base.py`. Existen **d
   **Response 200**: `{ "detail": "Contraseña actualizada." }`
 
   **Errores**: `400` si `uid`/`token` son inválidos o ya expiraron (`PASSWORD_RESET_TIMEOUT` de Django, 3 días por defecto — no lo cambiamos), o si la contraseña nueva no pasa `AUTH_PASSWORD_VALIDATORS`. El token es de un solo uso: en cuanto cambias la contraseña, `default_token_generator` lo invalida solo (no hace falta guardar/borrar nada aparte).
+- **Login de sesión (cookie) para un frontend en el navegador**: Basic Auth manda usuario/contraseña en cada petición, lo cual es aceptable desde Postman/un script pero no algo que un frontend en el navegador deba hacer (implicaría guardar la contraseña en el cliente). Por eso, además de Basic Auth, existen 4 endpoints en `apps/users/views.py` que usan la `SessionAuthentication` que ya estaba declarada en `DEFAULT_AUTHENTICATION_CLASSES` desde el principio:
+
+  - **`GET /api/v1/auth/csrf/`** — pone la cookie `csrftoken` en el navegador y de paso la devuelve en el body (`{"csrfToken": "..."}`) por si el cliente la necesita explícitamente. Hay que llamarlo una vez, antes del primer `POST`/`PATCH`/`DELETE`, porque Django rechaza esas peticiones con `403` si no existe la cookie todavía (protección CSRF estándar de Django, que sigue activa para `SessionAuthentication`).
+  - **`POST /api/v1/auth/login/`** — body `{ "username": "...", "password": "..." }`. Valida credenciales con `django.contrib.auth.authenticate()` y, si son correctas, crea la sesión (cookie `sessionid`) con `django.contrib.auth.login()`. Responde `200` con `{ "id", "username", "email", "is_staff" }`, o `400` con `{"non_field_errors": ["Usuario o contraseña incorrectos."]}` si fallan. Hay que mandar la cookie CSRF de vuelta como header `X-CSRFToken` (Django lo exige en cualquier `POST` mientras haya una cookie `csrftoken`, incluso en este endpoint que técnicamente no requiere estar ya autenticado).
+  - **`GET /api/v1/auth/me/`** — devuelve el usuario de la sesión actual (o de Basic Auth, si se manda así). `401` si no hay sesión ni credenciales válidas — así es como el frontend sabe si debe mostrar el login.
+  - **`POST /api/v1/auth/logout/`** — cierra la sesión (`django.contrib.auth.logout()`). Requiere estar autenticado (con la sesión que se va a cerrar) y el header `X-CSRFToken`.
+
+  Estos 4 endpoints son los que usa el frontend real (`Invernadero-Frontend`, ver [Checklist para desarrollar el frontend](#checklist-para-desarrollar-el-frontend)); Postman sigue usando Basic Auth por simplicidad (ver la colección, carpeta "Autenticación").
 - **Creación de usuarios de staff/admin**: sigue siendo únicamente vía `python manage.py createsuperuser` o el panel `/admin/` — ni el registro público ni la recuperación de contraseña crean o tocan usuarios `is_staff`.
 - Por defecto (`IsAuthenticated`), **todo** endpoint exige estar autenticado, salvo que la vista lo declare explícitamente distinto.
 
-Ejemplo de cómo debe autenticarse el frontend (Basic Auth, que es lo único disponible hoy):
+Ejemplo de cómo se autentica un script o Postman (Basic Auth):
 
 ```http
 GET /api/v1/greenhouses/ HTTP/1.1
 Host: localhost:8000
 Authorization: Basic ZWxwYXRyb246bWljbGF2ZQ==
 ```
+
+El frontend real, en cambio, usa el login de sesión de arriba (cookie `sessionid` + `X-CSRFToken`) en vez de Basic Auth — ver `Invernadero-Frontend/README.md`, sección "Flujo de autenticación", para el detalle de por qué (y cómo evita el problema de cookies entre orígenes con un proxy de desarrollo de Vite).
 
 ### 2. Dispositivos físicos (sensores/actuadores)
 
@@ -528,8 +540,10 @@ Un usuario `is_staff` (marcado como staff en Django, ej. un superusuario) se tra
 
 | Endpoint | Cualquier autenticado | Miembro (cualquier rol) | Operator o superior | Solo Owner (o staff) |
 |---|---|---|---|---|
-| Leer catálogos globales (`sensor-types`, `actuator-types`) | Sí | — | — | — |
-| Escribir catálogos globales | Solo staff (`IsAdminUser`) | — | — | — |
+| Leer tipos globales (`sensor-types`, `actuator-types`) | Sí | — | — | — |
+| Leer tipos propios de un invernadero | — | Sí | — | — |
+| Escribir tipos globales | Solo staff | — | — | — |
+| Escribir tipos propios de un invernadero | — | — | — | Sí |
 | Leer invernaderos/zonas/dispositivos/sensores/actuadores propios | — | Sí | — | — |
 | Crear/editar/borrar invernaderos/zonas/dispositivos/sensores/actuadores | — | — | — | Sí |
 | Cambiar el estado de un actuador (`POST /actuators/{id}/state/`) | — | — | Sí | Sí |
@@ -546,6 +560,20 @@ Prefijo común para todo lo siguiente: `http://localhost:8000/api/v1/` en desarr
 Además de la API, existen:
 - `/admin/` — panel de administración de Django.
 - `/api-auth/` — login/logout de sesión de DRF, solo para navegar la API en el navegador durante desarrollo.
+
+### Autenticación de usuarios (`apps/users`)
+
+Ver [Autenticación](#autenticación) para el detalle completo de cada uno; resumen rápido:
+
+| Endpoint | Método | Auth previa | Para qué |
+|---|---|---|---|
+| `/api/v1/auth/register/` | POST | Ninguna (`AllowAny`) | Crear una cuenta nueva. |
+| `/api/v1/auth/csrf/` | GET | Ninguna | Poner la cookie `csrftoken` antes de un login de sesión. |
+| `/api/v1/auth/login/` | POST | Ninguna | Crear una sesión (cookie `sessionid`) con usuario/contraseña. |
+| `/api/v1/auth/logout/` | POST | Sesión o Basic | Cerrar la sesión actual. |
+| `/api/v1/auth/me/` | GET | Sesión o Basic | Ver quién está autenticado (`401` si nadie). |
+| `/api/v1/auth/password-reset/` | POST | Ninguna | Pedir el enlace de recuperación por email. |
+| `/api/v1/auth/password-reset/confirm/` | POST | Ninguna (el `uid`/`token` del enlace hacen de credencial) | Poner la contraseña nueva. |
 
 ### Invernaderos y zonas (`apps/greenhouses`)
 
@@ -603,7 +631,15 @@ Mismas reglas de permisos que invernaderos (lectura = miembro, escritura = Owner
 ### Sensores (`apps/sensors`)
 
 #### `GET/POST /api/v1/sensor-types/`, `GET/PUT/PATCH/DELETE /api/v1/sensor-types/{id}/`
-Catálogo global. Lectura: cualquier autenticado. Escritura: solo staff (`IsAdminUser`).
+Catálogo con dos alcances. El listado devuelve los globales más los propios de los invernaderos del usuario; se puede filtrar con `?greenhouse=<id>`.
+
+- Lectura: cualquier autenticado (solo ve los globales y los de sus invernaderos).
+- Escritura de un tipo global (`greenhouse: null` u omitido): solo staff; si no, `403` «Solo el staff puede crear o modificar tipos globales.».
+- Escritura de un tipo propio (`greenhouse: <id>`): Owner de ese invernadero o staff; si no, `403`.
+- Cada objeto incluye `greenhouse` y `can_edit` (booleano calculado para el usuario que consulta).
+- `400` si un tipo propio repite el código de un tipo global, o si se intenta cambiar `greenhouse` al editar.
+- Un sensor solo acepta tipos globales o del mismo invernadero.
+- Migración: `sensors.0002` y `actuators.0003`; los tipos existentes quedan como globales.
 
 **Request (POST, solo staff)**:
 ```json
@@ -652,14 +688,29 @@ Filtros: `?greenhouse=`, `?zone=`, `?sensor_type=`, `?device=`, `?is_active=`. B
   "persist_deadband": 0.5
 }
 ```
-**Errores**: `400` si `zone` no pertenece al mismo `greenhouse`; `403` si no eres Owner.
+**Errores**: `400` si `zone` no pertenece al mismo `greenhouse`; `403` si no eres Owner; `409` al hacer `DELETE` si el sensor ya tiene lecturas guardadas (`Reading.sensor` es `PROTECT`; ver [Borrados protegidos](#borrados-protegidos-409)). Para dejar de usar un sensor conservando su historial, desactívalo con `PATCH {"is_active": false}`.
+
+#### `POST /api/v1/sensors/{id}/purge/`
+Borrado **explícito e irreversible** de un sensor **junto con todas sus lecturas**. Existe para limpiar sensores de prueba o creados por error; el `DELETE` normal sigue negándose si hay historial.
+
+**Request**:
+```json
+{ "confirm_name": "Sensor Temp Zona Norte" }
+```
+`confirm_name` debe coincidir exactamente con el nombre actual del sensor (como confirmación).
+
+**Auth**: solo Owner del invernadero (o staff).
+
+**Response 200**: `{ "sensor_id": 7, "name": "Sensor Temp Zona Norte", "readings_deleted": 1240 }`. Las lecturas y el sensor se borran en una sola transacción, y se limpian sus claves de caché (último valor / último guardado).
+
+**Errores**: `400` si `confirm_name` falta o no coincide; `403` si no eres Owner; `404` si el sensor no existe o no es visible para ti.
 
 ---
 
 ### Actuadores (`apps/actuators`)
 
 #### `GET/POST /api/v1/actuator-types/`, detalle
-Catálogo global, mismas reglas que `sensor-types` (lectura abierta, escritura solo staff).
+Mismos alcances y reglas que `sensor-types` (globales del staff, propios del Owner del invernadero).
 
 #### `GET/POST /api/v1/actuators/`, `GET/PUT/PATCH/DELETE /api/v1/actuators/{id}/`
 Filtros: `?greenhouse=`, `?zone=`, `?actuator_type=`, `?is_active=`, `?state=`.
@@ -762,7 +813,17 @@ Genera un archivo `.xlsx` con las lecturas del rango pedido.
 
 **Auth**: usuario autenticado (no hay `permission_classes` explícito en esta vista, así que aplica el default `IsAuthenticated`; cualquier rol de membership puede exportar, no solo Owner).
 
-**Response 200**: archivo binario `.xlsx` (`Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`), nombre `lecturas_<YYYYMMDD>_<YYYYMMDD>.xlsx`, con columnas *Invernadero, Sensor, Tipo de sensor, Unidad, Fecha y hora (UTC), Valor*. El header de respuesta `X-Row-Count` trae el número de filas escritas — útil para el frontend sin tener que abrir el archivo.
+**Response 200**: archivo binario `.xlsx` (`Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`), nombre `lecturas_<YYYYMMDD>_<YYYYMMDD>.xlsx`. El header de respuesta `X-Row-Count` trae el total de lecturas escritas (suma de todas las hojas de sensor) — útil para el frontend sin tener que abrir el archivo.
+
+**Estructura del libro** (`apps/readings/exports.py`). Solo aparecen los sensores que tienen lecturas en el rango pedido:
+
+- **Hoja `Resumen`** (primera pestaña): una fila por sensor con invernadero, tipo, unidad, número de lecturas, mínimo, máximo, promedio, desviación estándar, última lectura y su fecha, y cuántas lecturas cayeron fuera del rango válido del tipo (en rojo si hay alguna). El nombre del sensor es un enlace a su hoja. Incluye una gráfica de barras con las lecturas por sensor.
+- **Una hoja por sensor**, llamada `<nombre> #<sensor_id>` (máx. 31 caracteres, sin caracteres inválidos para Excel). Contiene:
+  - **Tabla** (columnas A–D): fecha y hora (UTC), valor, promedio móvil de 10 lecturas y estado (`Normal` / `Fuera de rango`, según `valid_min`/`valid_max` del tipo de sensor). Con autofiltro y encabezado congelado.
+  - **Estadísticas** (columnas F–G), como fórmulas de Excel sobre la tabla (se recalculan si filtras o editas): lecturas, mínimo y máximo con su fecha, promedio, mediana, desviación estándar, rango, primera/última lectura y su cambio, inicio/fin y duración del periodo, intervalo promedio entre lecturas, hueco más largo sin lecturas, y cantidad y porcentaje de lecturas fuera de rango.
+  - **Gráfica de línea** del valor en el tiempo con una línea de tendencia (promedio móvil), y un **histograma** de la distribución de valores (10 intervalos).
+  - Si el sensor tiene más de 2,000 lecturas, la gráfica usa una muestra guardada en las columnas AA–AC de la hoja (la tabla conserva todas las filas).
+- Límite de Excel: 1,048,575 filas por hoja; si un sensor las supera, se exportan las más recientes y se indica en la hoja.
 
 **Errores**: `400` si el rango de fechas es inválido o supera 366 días, o si `sensor` no existe.
 
@@ -821,6 +882,7 @@ Códigos que realmente puede producir la API (no una lista genérica):
 | `400 Bad Request` | Datos inválidos (serializer), rango de fechas inválido en export, timestamp fuera de tolerancia en ingesta |
 | `401 Unauthorized` | Sin credenciales o credenciales inválidas (Basic/Session) |
 | `403 Forbidden` | Autenticado pero sin el rol/permiso necesario (ej. no ser Owner para escribir, no ser Operator+ para controlar un actuador) |
+| `409 Conflict` | Se intentó borrar algo que todavía tiene elementos que dependen de él (llaves foráneas `PROTECT`). Ver [Borrados protegidos](#borrados-protegidos-409) |
 | `404 Not Found` | Recurso que no existe, o que existe pero no está en tu queryset visible (multi-tenant) |
 | `429 Too Many Requests` | Se superó el rate limit (`AnonRateThrottle`/`UserRateThrottle`/`DeviceRateThrottle`, ver [Seguridad](#seguridad)). Trae el header `Retry-After` con los segundos a esperar. |
 | `500 Internal Server Error` | No documentado explícitamente en el código como manejado — cualquier excepción no capturada cae aquí (comportamiento por defecto de Django/DRF) |
@@ -852,7 +914,19 @@ Códigos que realmente puede producir la API (no una lista genérica):
 
 ### Exportar un histórico a Excel
 1. `GET /api/v1/readings/export/?date_from=...&date_to=...` (rango ≤ 366 días).
-2. El backend arma el `.xlsx` en memoria con `XlsxWriter` (modo `constant_memory`, para no acumular todo el libro en RAM) y lo devuelve como descarga.
+2. El backend recorre las lecturas ordenadas por `(sensor, fecha)` una sola vez y arma el `.xlsx` con `XlsxWriter`: una hoja `Resumen` más una hoja por sensor con su tabla, estadísticas y gráficas (ver la estructura en el endpoint de exportación). En memoria solo vive un sensor a la vez, y el libro se devuelve como descarga.
+
+### Borrados protegidos (409)
+
+Varias llaves foráneas usan `on_delete=PROTECT` para no perder datos por accidente: un invernadero con dispositivos, sensores o actuadores; un sensor con lecturas; un tipo de sensor/actuador en uso. Django lanza `ProtectedError` al intentar borrarlos, y antes eso terminaba en un `500` con la página de depuración.
+
+Ahora `apps/common/exceptions.py` (`custom_exception_handler`, registrado en `REST_FRAMEWORK["EXCEPTION_HANDLER"]` de `config/settings/base.py`) lo convierte en un `409 Conflict` con un mensaje en español que dice qué lo bloquea:
+
+```json
+{ "detail": "No se puede eliminar porque todavía tiene elementos que dependen de él (5 dispositivos, 12 sensores, 3 actuadores). Elimínalos o muévelos primero." }
+```
+
+Es un handler global: aplica a cualquier `DELETE` de la API, no solo a invernaderos o sensores. El resto de las excepciones siguen el comportamiento normal de DRF.
 
 ---
 
@@ -1015,7 +1089,8 @@ Aparte de ese punto — que es un bloqueante real, no un detalle — esto es lo 
 - **Permisos**: las clases de `apps/memberships/permissions.py` devuelven `403` cuando el usuario está autenticado pero no tiene el rol necesario; DRF devuelve `401` cuando ni siquiera hay autenticación válida.
 - **Visibilidad multi-tenant**: un recurso que existe pero no es tuyo no da `403` sino `404` — el `get_queryset()` filtrado hace que, para ti, simplemente no exista (esto es consistente en toda la API salvo en `IsGreenhouseMember.has_object_permission`, que si el objeto sí resultó visible pero el método es de escritura, ahí sí da `403`).
 - **Formato de error estándar de DRF**: `{"detail": "mensaje"}` para errores de permiso/autenticación/no encontrado; `{"campo": ["mensaje"]}` para errores de validación de un serializer.
-- **Errores no manejados explícitamente**: no hay un `exception_handler` personalizado en `REST_FRAMEWORK`, así que cualquier excepción no prevista cae en el manejo por defecto de Django/DRF (`500` en producción con `DEBUG=False`, página de traceback completa si `DEBUG=True`).
+- **Borrados protegidos**: hay un `exception_handler` propio (`apps/common/exceptions.py`) que convierte el `ProtectedError` de Django en un `409 Conflict` con mensaje claro (ver [Borrados protegidos](#borrados-protegidos-409)).
+- **Errores no manejados explícitamente**: cualquier otra excepción imprevista sigue el manejo por defecto de Django/DRF (`500` en producción con `DEBUG=False`, página de traceback completa si `DEBUG=True`).
 
 ---
 
@@ -1102,17 +1177,18 @@ Lo que **no** está implementado (constatado por ausencia en el código, no una 
 
 - [ ] **URL base**: `http://localhost:8000/api/v1/` en desarrollo (producción: no identificado en el código, defínela cuando exista un despliegue real).
 - [ ] **CORS**: el origen del frontend debe estar en `CORS_ALLOWED_ORIGINS` (variable de entorno del backend, no del frontend) — pídele al equipo de backend que agregue tu origen si el navegador bloquea las llamadas.
-- [ ] **Autenticación**: Basic Auth (usuario + contraseña en cada petición) o sesión de Django. No hay JWT — no hay token que renovar ni guardar de forma especial; si usas Basic Auth, decide cómo vas a guardar/enviar la contraseña de forma segura en el cliente.
-- [ ] **Cómo iniciar sesión**: no hay endpoint de login de API dedicado más allá de `/api-auth/login/` (pensado para navegar la API en desarrollo, con `SessionAuthentication`). Para un frontend real, lo disponible hoy es mandar `Authorization: Basic ...` en cada petición.
-- [ ] **Endpoints disponibles**: ver [API completa](#api-completa) — invernaderos, zonas, tipos de sensor, dispositivos, sensores, tipos de actuador, actuadores (+ acción `state` y `history`), lecturas (+ `ingest` y `export`), membresías.
-- [ ] **Headers requeridos**: `Content-Type: application/json` en escrituras; `Authorization: Basic ...` en todo lo demás salvo la ingesta de dispositivos (`X-Device-Key`, que no es para el frontend sino para hardware).
+- [x] **Autenticación**: login de sesión con cookie + CSRF (`/auth/csrf/`, `/auth/login/`, `/auth/logout/`, `/auth/me/`) pensado para un frontend en el navegador, además de Basic Auth (para Postman/scripts). No hay JWT — no hay token que renovar ni guardar de forma especial. Ver [Autenticación](#autenticación).
+- [x] **Cómo iniciar sesión**: `POST /api/v1/auth/login/` con `{username, password}` (después de pedir la cookie CSRF con `GET /api/v1/auth/csrf/`). Ver el flujo completo, con el problema de cookies entre orígenes resuelto vía proxy de Vite, en `Invernadero-Frontend/README.md`.
+- [ ] **Endpoints disponibles**: ver [API completa](#api-completa) — autenticación, invernaderos, zonas, tipos de sensor, dispositivos, sensores, tipos de actuador, actuadores (+ acción `state` y `history`), lecturas (+ `ingest` y `export`), membresías.
+- [ ] **Headers requeridos**: `Content-Type: application/json` en escrituras; cookie de sesión + `X-CSRFToken` (frontend) o `Authorization: Basic ...` (Postman/scripts) en todo lo demás salvo la ingesta de dispositivos (`X-Device-Key`, que no es para el frontend sino para hardware).
 - [ ] **Formato de request/response**: JSON estándar; ver ejemplos reales en cada endpoint de la sección [API completa](#api-completa).
 - [ ] **Manejo de errores**: `{detail: "..."}` para permisos/autenticación/no-encontrado; `{campo: ["..."]}` para validación. Ver [Manejo de errores](#manejo-de-errores).
 - [ ] **Paginación**: por página (`?page=`) casi en todo; por cursor (`?cursor=`, solo avance/retroceso) en `/readings/`.
 - [ ] **WebSocket**: primero `POST /api/v1/realtime/ws-token/` (autenticado) para obtener un token de un solo uso, luego conectar a `ws://localhost:8000/ws/greenhouses/<id>/?token=<token>`; conecta uno por invernadero que el usuario esté viendo; escucha los eventos `snapshot`, `sensor_reading`, `actuator_state_changed` (ver [WebSockets](#websockets--tiempo-real)). El token expira en 30s y es de un solo uso, así que pide uno nuevo justo antes de cada conexión/reconexión.
 - [ ] **Roles**: el frontend debería ocultar/deshabilitar acciones de escritura según el rol del usuario en cada invernadero (Owner/Operator/Viewer) — el backend las rechaza igual (`403`), pero conviene reflejarlo en la interfaz para no ofrecer botones que van a fallar.
-- [ ] **Variables de entorno del frontend**: no identificado en el código (este repositorio es solo el backend).
-- [ ] **Diferencias desarrollo/producción**: hoy solo existe configuración de desarrollo; cuando exista un entorno de producción, la URL base, el esquema (`wss://` para WebSocket) y probablemente la forma de autenticarse deberán actualizarse.
+- [x] **Frontend real**: existe en `Invernadero-Frontend/` (carpeta hermana de este repo) — React + Vite + TypeScript + TanStack Query, con proxy de desarrollo para evitar el problema de cookies entre orígenes. Ver su propio `README.md` para cómo correrlo y cómo está organizado. No manda lecturas manualmente (eso es trabajo de los controladores físicos vía `X-Device-Key`); sí administra invernaderos, sensores, actuadores (con tipos "predesignados" con ícono) y membresías, y muestra todo en vivo por WebSocket.
+- [ ] **Variables de entorno del frontend**: no aplica desde este repo — ver `Invernadero-Frontend/README.md`.
+- [ ] **Diferencias desarrollo/producción**: hoy solo existe configuración de desarrollo; cuando exista un entorno de producción, la URL base, el esquema (`wss://` para WebSocket) y cómo se sirven juntos frontend/backend (mismo dominio, `CSRF_TRUSTED_ORIGINS`, etc.) deberán definirse según el hosting real.
 
 ---
 
@@ -1124,7 +1200,7 @@ Cosas que valen la pena que sepas antes de construir el frontend o de llevar est
 - ~~WebSocket sin autenticación ni autorización~~ — **resuelto**: `GreenhouseConsumer.connect()` ahora exige un token de un solo uso emitido por `POST /api/v1/realtime/ws-token/` y valida `Membership` sobre el invernadero; ver [WebSockets](#websockets--tiempo-real).
 - **`apps/actuators/permissions.py::CanControlActuators` — resuelto/limpiado**: el archivo ya no contiene la clase, solo un comentario explicando por qué quedó sin uso (fue reemplazada por `IsGreenhouseOperatorOrAbove` de `apps/memberships/permissions.py`) y el comando para borrar el archivo por completo cuando quieras (`del apps\actuators\permissions.py` en Windows / `rm apps/actuators/permissions.py` en Linux/Mac). Nada en el proyecto lo importa.
 - ~~`REDIS_CACHE_URL` no está documentada en `.env.example`~~ — **resuelto**: ya aparece listada junto a `REDIS_URL` en `.env.example`, con comentario.
-- **No hay endpoint de registro ni de login de API "real"** — crear usuarios depende de `createsuperuser`/shell/admin; no hay forma de que un cliente se registre por sí mismo, ni de recuperar contraseña.
+- ~~No hay endpoint de registro ni de login de API "real"~~ — **resuelto**: `POST /api/v1/auth/register/` para registro público, `POST /api/v1/auth/password-reset/` + `/confirm/` para recuperación, y `POST /api/v1/auth/login/` + `/logout/` + `GET /api/v1/auth/me/` + `/csrf/` para login de sesión (cookie) pensado para un frontend en el navegador. Ver [Autenticación](#autenticación). Sigue dependiendo de `createsuperuser`/admin solo para crear usuarios `is_staff` — eso es intencional.
 - ~~Invitar a un usuario a un invernadero requiere su `id` numérico~~ — **resuelto**: `POST /api/v1/memberships/` ahora también acepta `invite` (`username` o `email`) en vez de `user`; ver [Membresías](#membresías-appsmemberships).
 - ~~El `Dockerfile` sigue usando el servidor de desarrollo / comentario desactualizado~~ — **resuelto**: el comentario ahora explica por qué `CMD` sigue siendo `runserver` en desarrollo (no es un descuido); producción usa Daphne directo vía `docker-compose.prod.yml`.
 - ~~No hay `prod.py`, ni Dockerfile/compose de producción~~ — **resuelto** (con alcance acotado): ver [Producción](#producción). Sigue faltando un reverse proxy real y CI/CD, que dependen de dónde despliegues.

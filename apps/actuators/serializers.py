@@ -1,12 +1,14 @@
 from rest_framework import serializers
 
+from apps.common.types import TypeCatalogSerializerMixin
+
 from .models import Actuator, ActuatorStateHistory, ActuatorType
 
 
-class ActuatorTypeSerializer(serializers.ModelSerializer):
+class ActuatorTypeSerializer(TypeCatalogSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = ActuatorType
-        fields = ["id", "code", "name", "description"]
+        fields = ["id", "greenhouse", "code", "name", "description", "can_edit"]
         read_only_fields = ["id"]
 
 
@@ -33,6 +35,11 @@ class ActuatorSerializer(serializers.ModelSerializer):
         if zone and greenhouse and zone.greenhouse_id != greenhouse.id:
             raise serializers.ValidationError(
                 {"zone": "La zona debe pertenecer al mismo invernadero que el actuador."}
+            )
+        actuator_type = attrs.get("actuator_type", getattr(self.instance, "actuator_type", None))
+        if actuator_type and greenhouse and actuator_type.greenhouse_id not in (None, greenhouse.id):
+            raise serializers.ValidationError(
+                {"actuator_type": "Ese tipo de actuador pertenece a otro invernadero."}
             )
         return attrs
 

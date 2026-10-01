@@ -1,4 +1,4 @@
-from django.contrib.auth import get_user_model
+from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.utils.encoding import force_bytes, force_str
@@ -6,6 +6,39 @@ from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from rest_framework import serializers
 
 User = get_user_model()
+
+
+class LoginSerializer(serializers.Serializer):
+    """
+    Para POST /api/v1/auth/login/ (ver views.py::SessionLoginView).
+
+    Es un login por SESIÓN (cookie), pensado para el frontend -- no
+    reemplaza a BasicAuthentication (que sigue funcionando igual, para
+    Postman/scripts). `authenticate()` es la misma función que usa
+    Django internamente para /admin/ y para BasicAuthentication: no
+    reinventa cómo se valida usuario+contraseña.
+    """
+    username = serializers.CharField()
+    password = serializers.CharField(write_only=True, style={"input_type": "password"})
+
+    def validate(self, attrs):
+        user = authenticate(
+            self.context["request"], username=attrs["username"], password=attrs["password"]
+        )
+        if user is None:
+            raise serializers.ValidationError("Usuario o contraseña incorrectos.")
+        if not user.is_active:
+            raise serializers.ValidationError("Esta cuenta está desactivada.")
+        attrs["user"] = user
+        return attrs
+
+
+class UserSerializer(serializers.ModelSerializer):
+    """Para GET /api/v1/auth/me/ -- lo mínimo que el frontend necesita saber de sí mismo."""
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "email", "is_staff"]
 
 
 class RegisterSerializer(serializers.ModelSerializer):

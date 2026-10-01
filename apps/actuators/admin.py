@@ -5,7 +5,8 @@ from .models import Actuator, ActuatorStateHistory, ActuatorType
 
 @admin.register(ActuatorType)
 class ActuatorTypeAdmin(admin.ModelAdmin):
-    list_display = ("name", "code")
+    list_display = ("name", "code", "greenhouse")
+    list_filter = ("greenhouse",)
     prepopulated_fields = {"code": ("name",)}
 
 

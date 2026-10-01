@@ -1,13 +1,18 @@
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user_model, login, logout
 from django.core.mail import send_mail
+from django.middleware.csrf import get_token
+from django.views.decorators.csrf import ensure_csrf_cookie
+from django.utils.decorators import method_decorator
 from rest_framework import generics, permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .serializers import (
+    LoginSerializer,
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
     RegisterSerializer,
+    UserSerializer,
     build_uid_and_token,
 )
 
@@ -111,3 +116,67 @@ class PasswordResetConfirmView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response({"detail": "Contraseña actualizada."})
+
+
+@method_decorator(ensure_csrf_cookie, name="get")
+class CsrfCookieView(APIView):
+    """
+    GET /api/v1/auth/csrf/
+
+    No hace nada más que forzar que Django mande la cookie `csrftoken`
+    en la respuesta (`ensure_csrf_cookie`). El frontend llama esto UNA
+    vez al arrancar, antes de intentar login -- sin la cookie, no hay
+    token que mandar de vuelta en el header `X-CSRFToken`, y Django
+    rechazaría el POST de login con 403 (CsrfViewMiddleware ya está
+    activo para todo el proyecto, ver MIDDLEWARE en settings).
+    """
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        # get_token() además marca la cookie como "usada", lo que
+        # Django necesita para decidir mandarla en la respuesta.
+        return Response({"detail": "Cookie CSRF puesta.", "csrfToken": get_token(request)})
+
+
+class SessionLoginView(APIView):
+    """
+    POST /api/v1/auth/login/
+
+    Login por SESIÓN (cookie), pensado para el frontend -- requiere
+    haber llamado antes a GET /api/v1/auth/csrf/ y mandar esa cookie
+    de vuelta como header X-CSRFToken (ver CsrfCookieView). No
+    reemplaza BasicAuthentication, que sigue funcionando igual para
+    Postman/scripts.
+    """
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        serializer = LoginSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        user = serializer.validated_data["user"]
+        login(request, user)
+        return Response(UserSerializer(user).data)
+
+
+class LogoutView(APIView):
+    """POST /api/v1/auth/logout/ -- cierra la sesión actual."""
+
+    def post(self, request):
+        logout(request)
+        return Response({"detail": "Sesión cerrada."})
+
+
+class MeView(APIView):
+    """
+    GET /api/v1/auth/me/
+
+    El frontend llama esto al arrancar para saber si ya hay una sesión
+    activa (200 con el usuario) o no (401, gracias a IsAuthenticated
+    por defecto) -- así decide si mostrar la pantalla de login o la
+    app, sin tener que "adivinar" leyendo cookies desde JS.
+    """
+
+    def get(self, request):
+        return Response(UserSerializer(request.user).data)

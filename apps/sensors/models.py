@@ -3,6 +3,7 @@ import secrets
 from django.contrib.auth.hashers import check_password, make_password
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
 
 
 class SensorType(models.Model):
@@ -13,7 +14,15 @@ class SensorType(models.Model):
     de sensor nuevo es INSERTAR UNA FILA aquí (por API o admin),
     nunca escribir código ni migrar la base de datos.
     """
-    code = models.SlugField(max_length=50, unique=True, help_text="Ej: 'temperature'")
+    # Ámbito: vacío = tipo GLOBAL (lo administra el staff y lo ven todos los
+    # invernaderos); con valor = tipo PROPIO de ese invernadero (solo lo ven
+    # sus miembros y solo lo administra su Owner). Ver apps/common/types.py.
+    greenhouse = models.ForeignKey(
+        "greenhouses.Greenhouse", on_delete=models.CASCADE, null=True, blank=True,
+        related_name="sensor_types",
+        help_text="Vacío = tipo global. Con invernadero = solo visible para ese invernadero.",
+    )
+    code = models.SlugField(max_length=50, help_text="Ej: 'temperature'")
     name = models.CharField(max_length=100, help_text="Ej: 'Temperatura'")
     default_unit = models.CharField(max_length=20, help_text="Ej: '°C', '%', 'ppm'")
 
@@ -28,6 +37,17 @@ class SensorType(models.Model):
 
     class Meta:
         ordering = ["name"]
+        constraints = [
+            # El código es único entre los tipos globales...
+            models.UniqueConstraint(
+                fields=["code"], condition=Q(greenhouse__isnull=True),
+                name="sensortype_code_unique_global",
+            ),
+            # ...y único dentro de cada invernadero para los tipos propios.
+            models.UniqueConstraint(
+                fields=["greenhouse", "code"], name="sensortype_code_unique_per_greenhouse",
+            ),
+        ]
 
     def __str__(self):
         return self.name

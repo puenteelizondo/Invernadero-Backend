@@ -5,7 +5,8 @@ from .models import Device, Sensor, SensorType
 
 @admin.register(SensorType)
 class SensorTypeAdmin(admin.ModelAdmin):
-    list_display = ("name", "code", "default_unit", "valid_min", "valid_max")
+    list_display = ("name", "code", "greenhouse", "default_unit", "valid_min", "valid_max")
+    list_filter = ("greenhouse",)
     prepopulated_fields = {"code": ("name",)}
 
 
