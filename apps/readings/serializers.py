@@ -47,11 +47,16 @@ class ReadingIngestItemSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         device = self.context["device"]
-        try:
-            sensor = Sensor.objects.select_related("sensor_type", "greenhouse").get(
+        # La vista precarga todos los sensores del lote en una sola consulta
+        # (context["sensors"]); si no viene, se consulta de a uno.
+        preloaded = self.context.get("sensors")
+        if preloaded is not None:
+            sensor = preloaded.get(attrs["sensor_id"])
+        else:
+            sensor = Sensor.objects.select_related("sensor_type", "greenhouse").filter(
                 pk=attrs["sensor_id"]
-            )
-        except Sensor.DoesNotExist:
+            ).first()
+        if sensor is None:
             raise serializers.ValidationError({"sensor_id": "El sensor no existe."})
 
         if sensor.device_id != device.id:

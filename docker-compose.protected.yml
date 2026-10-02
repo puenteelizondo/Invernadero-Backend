@@ -1,0 +1,64 @@
+# Para el SERVIDOR DESTINO: no necesita el código, solo este archivo, un .env
+# y la imagen (cargada con `docker load` o descargada de un registry privado).
+#
+#   docker load < invernadero-backend.tar.gz      # si se entrega como archivo
+#   docker compose -f docker-compose.protected.yml up -d
+#
+# Variables mínimas en .env: DJANGO_SECRET_KEY, POSTGRES_DB/USER/PASSWORD,
+# DJANGO_ALLOWED_HOSTS (ver .env.example). DEBUG debe quedar en False.
+name: invernadero-protegido
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    image: invernadero-backend:1.0
+    env_file: .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.dev
+    # PRUEBA LOCAL (settings.dev no define STATIC_ROOT, por eso sin collectstatic).
+    # En el servidor real, con config.settings.prod, QUITA este bloque `command`:
+    # la imagen ya trae por defecto migrate + collectstatic + daphne.
+    command: sh -c "python manage.py migrate --noinput && daphne -b 0.0.0.0 -p 8000 config.asgi:application"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  alerts-monitor:
+    image: invernadero-backend:1.0
+    env_file: .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.dev
+    command: python manage.py monitor_alerts --interval 15
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+volumes:
+  postgres_data:
+  redis_data:

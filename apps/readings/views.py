@@ -3,11 +3,13 @@ from rest_framework import viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.common.realtime import publish_event
+from apps.alerts import engine as alert_engine
+from apps.common.realtime import publish_event, publish_events
 from apps.memberships.mixins import GreenhouseScopedMixin
 from apps.memberships.permissions import IsGreenhouseMember
 from apps.memberships.scoping import visible_greenhouse_ids
 from apps.sensors.authentication import DeviceKeyAuthentication
+from apps.sensors.models import Sensor
 from apps.sensors.permissions import IsDeviceAuthenticated
 from apps.sensors.throttling import DeviceRateThrottle
 
@@ -58,13 +60,26 @@ class ReadingIngestView(APIView):
                 status=400,
             )
 
+        # Una sola consulta para todos los sensores del lote (antes, una por lectura).
+        wanted = {
+            item["sensor_id"] for item in raw_items
+            if isinstance(item, dict) and isinstance(item.get("sensor_id"), int)
+        }
+        sensors = {
+            sn.id: sn
+            for sn in Sensor.objects.select_related("sensor_type", "greenhouse").filter(pk__in=wanted)
+        }
+
+        rules = alert_engine.load_rules(sensors.keys())  # reglas de alerta del lote (1 consulta)
+
         results = []
+        events = []
         to_create = []
         to_mark_persisted = []
 
         for index, item in enumerate(raw_items):
             serializer = ReadingIngestItemSerializer(
-                data=item, context={"device": device}
+                data=item, context={"device": device, "sensors": sensors}
             )
             if serializer.is_valid():
                 data = serializer.validated_data
@@ -80,12 +95,15 @@ class ReadingIngestView(APIView):
                     to_mark_persisted.append((sensor, value, timestamp))
 
                 mark_latest(sensor, value, timestamp)
+                sensor_rules = rules.get(sensor.id)
+                if sensor_rules:
+                    events.extend(alert_engine.evaluate(sensor_rules, sensor, value, timestamp))
 
                 results.append(
                     {"index": index, "status": "accepted", "persisted": persisted}
                 )
 
-                publish_event(
+                events.append((
                     sensor.greenhouse_id,
                     "sensor_reading",
                     {
@@ -97,11 +115,13 @@ class ReadingIngestView(APIView):
                         "timestamp": timestamp.isoformat(),
                         "persisted": persisted,
                     },
-                )
+                ))
             else:
                 results.append(
                     {"index": index, "status": "rejected", "errors": serializer.errors}
                 )
+
+        publish_events(events)
 
         if to_create:
             Reading.objects.bulk_create(to_create, ignore_conflicts=True)

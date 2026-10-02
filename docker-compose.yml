@@ -50,6 +50,22 @@ services:
       redis:
         condition: service_healthy
 
+  # Vigila los sensores que dejaron de reportar (alertas de "sin señal").
+  # La ingesta solo se entera de lo que LLEGA; detectar el silencio requiere un
+  # proceso aparte que revise cada pocos segundos.
+  alerts-monitor:
+    build: .
+    env_file: .env
+    volumes:
+      - .:/app
+    command: python manage.py monitor_alerts --interval 15
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redis_data:

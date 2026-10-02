@@ -72,6 +72,7 @@ INSTALLED_APPS = [
     "apps.readings",
     "apps.actuators",
     "apps.memberships",
+    "apps.alerts",
 ]
 
 MIDDLEWARE = [
@@ -241,3 +242,6 @@ CACHES = {
         "LOCATION": env("REDIS_CACHE_URL", default="redis://redis:6379/1"),
     }
 }
+
+# Alertas: las ya resueltas se borran solas pasados estos días (0 = nunca).
+ALERT_RETENTION_DAYS = env.int("ALERT_RETENTION_DAYS", default=90)

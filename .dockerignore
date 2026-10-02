@@ -9,3 +9,6 @@ venv/
 .vscode/
 *.sqlite3
 staticfiles/
+build/
+*.so
+*.c

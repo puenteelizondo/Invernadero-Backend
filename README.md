@@ -170,6 +170,7 @@ Cada app de `apps/` sigue el patrón estándar de Django (`models.py`, `views.py
 | `apps/readings` | Todo lo relacionado con las lecturas: el modelo `Reading`, el endpoint de ingesta, la política de qué se guarda (`persistence.py`), la exportación a Excel (`exports.py`) y un comando de management para generar datos sintéticos de prueba. |
 | `apps/actuators` | Catálogo de tipos de actuador, los actuadores y su historial de cambios de estado. |
 | `apps/memberships` | El modelo multi-tenant: quién (`User`) puede hacer qué (`Role`) en cuál invernadero (`Greenhouse`). Aporta los permisos y mixins que usan **todas** las demás apps para filtrar por invernadero. |
+| `apps/alerts` | Alertas por umbral: reglas por sensor (`AlertRule`), episodios de alerta (`Alert`), el motor que las evalúa durante la ingesta (`engine.py`) y los avisos por WebSocket y correo. |
 | `apps/realtime` | El consumer de WebSocket y su enrutado (`routing.py`), importado desde `config/asgi.py`. |
 | `apps/common` | `realtime.py`, con la función `publish_event()` — el único punto del código que sabe cómo hablar con el channel layer de Channels — y `exceptions.py`, el manejador de excepciones de la API (convierte `ProtectedError` en `409`). |
 
@@ -829,6 +830,41 @@ Genera un archivo `.xlsx` con las lecturas del rango pedido.
 
 ---
 
+### Alertas (`apps/alerts`)
+
+Avisan cuando un sensor sale de los límites definidos para él. Se evalúan **durante la ingesta** (`POST /readings/ingest/`), sobre cada lectura aceptada.
+
+**Modelos**
+- `AlertRule` — regla de UN sensor, de dos clases (`rule_type`): **`threshold`** (fuera de límites): `min_value` y/o `max_value` (al menos uno) y `duration_seconds` (la condición debe sostenerse ese tiempo antes de abrir la alerta; `0` = al primer valor); y **`no_signal`** (sin señal): `duration_seconds` = segundos sin lecturas que se toleran (mínimo 30), sin límites. Además: `severity` (`warning`/`critical`), `is_active`, `notify_email`. Guarda su propio estado de evaluación: `breach_since` (desde cuándo está fuera de límites) y `active_alert` (la alerta abierta). Así sobrevive a reinicios y la ingesta lo recibe junto con la regla, sin consultas extra.
+- `Alert` — un episodio: `kind` (`high`/`low`), `status` (`active`/`resolved`), `threshold`, `trigger_value`, `peak_value` (el valor más extremo mientras estuvo abierta), `opened_at` (el inicio de la violación, no el momento en que se sostuvo la duración), `resolved_at`, `acknowledged_at/by`. `Alert.rule` es `SET_NULL`: borrar una regla conserva el historial; borrar un sensor (o su purge) elimina sus reglas y alertas.
+
+**Ciclo de vida.** Valor fuera de límites → se marca `breach_since`. Si se sostiene `duration_seconds` → se abre la `Alert`, se publica `alert_opened` y, si `notify_email`, se envía un correo a los propietarios del invernadero. Mientras siga abierta solo se actualiza el pico. Al volver a la normalidad se cierra sola (`alert_resolved`). Desactivar o borrar la regla con una alerta abierta también la cierra. Una lectura normal sin alerta abierta no cuesta ninguna escritura a la base.
+
+**Endpoints**
+
+| Endpoint | Quién | Notas |
+|---|---|---|
+| `GET /api/v1/alert-rules/` | Cualquier miembro | Filtros `?greenhouse=`, `?sensor=`, `?is_active=`. Incluye `has_active_alert`. |
+| `POST/PUT/PATCH/DELETE /api/v1/alert-rules/{id}/` | Solo Owner (o staff) | `greenhouse` se toma del sensor. No se puede cambiar el sensor de una regla. `400` si no hay ningún límite o `min_value >= max_value`. |
+| `GET /api/v1/alerts/` | Cualquier miembro | Solo lectura. Filtros `?greenhouse=`, `?status=active\|resolved`, `?sensor=`, `?severity=`, `?kind=high\|low\|stale`. Orden: más recientes primero. |
+| `POST /api/v1/alerts/{id}/acknowledge/` | Owner u Operator | Marca "ya la vi" (idempotente) y publica `alert_acknowledged`. |
+
+**Alertas de «sin señal» (`rule_type=no_signal`).** La ingesta solo se entera de lo que *llega*, así que detectar el silencio lo hace un proceso aparte: `python manage.py monitor_alerts [--interval 15] [--once]`, que cada 15 s revisa las reglas activas de sensores activos. En Docker lo ejecuta el servicio **`alerts-monitor`** de `docker-compose.yml` y `docker-compose.prod.yml` (`restart: unless-stopped`); **si ese servicio no está corriendo, estas alertas no se generan** (las de límites siguen funcionando porque viven en la ingesta).
+- El «último dato» de un sensor sale de la caché del último valor recibido (cubre también lecturas que no se guardan en la base); si Redis la perdió, de la última lectura guardada; si el sensor nunca reportó, se cuenta desde que se creó.
+- Se abre una `Alert` con `kind="stale"` cuando el silencio supera la tolerancia (`threshold` = segundos tolerados; `trigger_value`/`peak_value` = segundos sin datos, que se va actualizando en cada revisión; `opened_at` = el momento en que se superó la tolerancia) y se publica `alert_opened`; con `notify_email` se envía un correo de «Sin señal».
+- **Se cierra sola** en cuanto llega cualquier lectura de ese sensor (lo hace la ingesta, sin esperar al monitor). Desactivar o borrar la regla también la cierra.
+- Seguro ante varios monitores a la vez: la apertura se hace bajo `select_for_update` sobre la regla.
+- Los sensores inactivos (`is_active=False`) se ignoran. Tolerancia recomendada: bastante mayor que el intervalo con el que reporta el dispositivo.
+
+**Limpieza del historial.** Las alertas resueltas se conservan hasta que se borren:
+- *Manual*: `POST /api/v1/alerts/purge/` con `{"greenhouse": <id>, "older_than_days": <opcional>}` (solo Owner o staff). Borra solo alertas **resueltas** de ese invernadero —nunca las activas—; sin `older_than_days` borra todas las resueltas. Responde `{"deleted": N}`. En el frontend es el botón «Limpiar historial» de la pestaña Historial.
+- *Automática*: las resueltas con más de `ALERT_RETENTION_DAYS` días (por defecto **90**, `0` la desactiva; se define en `.env`) se borran solas. No hay programador de tareas en el proyecto, así que la limpieza se dispara como mucho una vez al día, cuando se resuelve una alerta (`engine.maybe_cleanup`, protegida con `cache.add` para que solo un proceso la ejecute).
+- *Por consola / cron*: `python manage.py purge_old_alerts [--days N]`.
+
+**Correo.** Usa la configuración `EMAIL_*` de `settings/base.py` (por defecto imprime en consola; define `EMAIL_BACKEND`, `EMAIL_HOST`, etc. en `.env` para enviar de verdad). Se envía en un hilo aparte para no retrasar la ingesta, y un fallo de envío nunca afecta la ingesta. Solo se envía al **abrirse** la alerta, no al resolverse.
+
+**Límites conocidos.** No hay histéresis (si el valor oscila justo en el límite se abren y cierran alertas seguidas; usa `duration_seconds` para amortiguarlo). Rendimiento medido (PostgreSQL y Redis reales, un proceso, 20 dispositivos × 10 sensores): ~390 lecturas/s sin reglas, ~320 con una regla por sensor que no se incumple y ~290 en el peor caso (todas las lecturas cambiando el estado de la alerta constantemente).
+
 ### Membresías (`apps/memberships`)
 
 #### `GET/POST /api/v1/memberships/`, `GET/PUT/PATCH/DELETE /api/v1/memberships/{id}/`
@@ -954,6 +990,9 @@ Es un handler global: aplica a cualquier `DELETE` de la API, no solo a invernade
 |---|---|---|
 | `snapshot` | Te conectas | `{"sensors": [...], "actuators": [...]}` (ver estructura completa en `consumers.py::_build_snapshot`) |
 | `sensor_reading` | Llega una lectura aceptada por `/readings/ingest/` (se haya guardado en PostgreSQL o no) | `{"sensor_id", "sensor_name", "sensor_type", "unit", "value", "timestamp", "persisted"}` |
+| `alert_opened` | Una regla de alerta se incumplió (y se sostuvo su duración) | `{"alert_id", "rule_id", "sensor_id", "sensor_name", "unit", "kind", "severity", "threshold", "value", "opened_at"}` |
+| `alert_resolved` | El valor volvió a la normalidad, o la regla se desactivó/borró | igual que `alert_opened` más `"resolved_at"` |
+| `alert_acknowledged` | Un Owner u Operator reconoció la alerta | `{"alert_id", "sensor_id", "acknowledged_by"}` |
 | `actuator_state_changed` | Un actuador cambia de estado de verdad (no si ya estaba en ese estado) | `{"actuator_id", "name", "greenhouse_id", "state", "changed_by", "source"}` |
 
 - **Reconexión**: no identificado en el código — es responsabilidad del cliente; el backend no manda ningún mensaje de "resume" ni conserva mensajes perdidos durante una desconexión (al reconectar simplemente vuelves a recibir un `snapshot` fresco). Como el token es de un solo uso, cada reconexión necesita pedir un token nuevo con `POST /api/v1/realtime/ws-token/`.
@@ -1162,6 +1201,7 @@ Medidas que **sí** están implementadas en el código:
 - **Validación de rango físico en lecturas**: rechaza valores absurdos según `valid_min`/`valid_max` del tipo de sensor.
 - **CORS con allowlist explícita**: `django-cors-headers`, con `CORS_ALLOWED_ORIGINS` leído del entorno y default vacío (nada permitido hasta configurarlo explícitamente); ver [CORS y frontend](#cors-y-frontend).
 - **Autenticación en el WebSocket**: token de un solo uso, de vida corta (`WS_TOKEN_TTL_SECONDS = 30`), emitido por un endpoint HTTP protegido con `IsAuthenticated`, más autorización por `Membership` sobre el invernadero al conectar; ver [WebSockets](#websockets--tiempo-real).
+- **Rendimiento de la ingesta** (`POST /readings/ingest/`): medido con PostgreSQL 16 y Redis reales, un solo proceso `daphne`, 20 dispositivos × 10 sensores en paralelo. Antes de optimizar: ~5 peticiones/s (~50 lecturas/s) y ~400 ms por petición, porque cada petición verificaba la API key con PBKDF2. Después: ~40 peticiones/s (~400 lecturas/s) y ~20 ms por petición suelta. Qué se hizo: (1) la verificación PBKDF2 de la clave se recuerda 5 minutos en caché (clave de caché = SHA-256 de la API key; el valor es el hash guardado del dispositivo, así que rotar la clave o desactivar el dispositivo invalida al instante); (2) `last_seen_at` solo se escribe si pasaron más de 30 s; (3) los sensores del lote se cargan en una consulta (antes una por lectura); (4) los eventos WebSocket del lote se publican con un solo `async_to_sync`, en serie (en paralelo desbordaba el pool de `channels_redis`). Límites conocidos: un solo proceso satura su CPU hacia ~400 lecturas/s; para más, varios procesos o contenedores detrás de un balanceador. Tras reiniciar el backend o vaciar la caché, la primera petición de cada dispositivo vuelve a pagar el PBKDF2 (~0.4 s de CPU), así que cientos de dispositivos reconectando a la vez forman una cola breve.
 - **Rate limiting básico**: `REST_FRAMEWORK["DEFAULT_THROTTLE_CLASSES"]` aplica `AnonRateThrottle` (`60/minute`, por IP) y `UserRateThrottle` (`300/minute`, por usuario autenticado) a toda la API por defecto — cubre `POST /api/v1/realtime/ws-token/` y cualquier intento de fuerza bruta contra Basic Auth. La ingesta de dispositivos (`POST /api/v1/readings/ingest/`) usa su propio throttle (`DeviceRateThrottle`, `120/minute` por dispositivo, `apps/sensors/throttling.py`) en vez del de usuario, porque ahí `request.user` siempre es `AnonymousUser` (se autentica por `X-Device-Key`, no como usuario) — con los throttles estándar, todos los dispositivos detrás de la misma IP (ej. varios ESP32 en la misma red) compartirían un solo límite en vez de tener cada uno el suyo.
 
 Lo que **no** está implementado (constatado por ausencia en el código, no una opinión):

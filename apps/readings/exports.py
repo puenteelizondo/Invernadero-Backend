@@ -1,6 +1,7 @@
 import math
 import re
 import statistics
+import os
 import tempfile
 from datetime import datetime, timezone as dt_timezone
 from itertools import groupby
@@ -29,6 +30,26 @@ CHART_MAX_POINTS = 2000
 HIST_BINS = 10
 # Excel solo permite 1,048,576 filas por hoja.
 MAX_ROWS_PER_SHEET = 1_048_575
+
+_ICON_DIR = os.path.join(os.path.dirname(__file__), "export_icons")
+# (palabras clave en el código/nombre del tipo, archivo de ícono)
+_ICON_KEYWORDS = [
+    (("temp",), "temperature"),
+    (("hum", "moist"), "humidity"),
+    (("lux", "light", "lumin", "luz"), "light"),
+    (("oxig", "oxyg", "o2"), "oxygen"),
+    (("wind", "vient"), "wind"),
+]
+
+
+def _icon_path(sensor):
+    """Ícono PNG del sensor según su tipo (genérico si no hay uno propio)."""
+    text = f"{sensor.sensor_type.code} {sensor.sensor_type.name}".lower()
+    for words, name in _ICON_KEYWORDS:
+        if any(w in text for w in words):
+            return os.path.join(_ICON_DIR, f"{name}.png")
+    return os.path.join(_ICON_DIR, "generic.png")
+
 
 _INVALID_SHEET_CHARS = re.compile(r"[\[\]:*?/\\]")
 
@@ -282,19 +303,35 @@ def build_readings_xlsx(queryset):
             vals = [sheet_name, 1, 1, n, 1]
             trend = [sheet_name, 1, 2, n, 2]
 
-        line = workbook.add_chart({"type": "line"})
+        # Dispersión con líneas (X = fecha y hora real): a diferencia de una
+        # gráfica de líneas con eje de fechas, no junta en un solo punto las
+        # lecturas del mismo día, así que se ven bien aunque lleguen cada segundo.
+        line = workbook.add_chart({"type": "scatter", "subtype": "straight"})
         line.add_series({"name": f"{sensor.name}", "categories": cats, "values": vals,
-                         "line": {"color": COLOR_LINE, "width": 1.5}})
+                         "line": {"color": COLOR_LINE, "width": 1.5},
+                         "marker": {"type": "none"} if n > 60 else
+                                   {"type": "circle", "size": 4,
+                                    "fill": {"color": COLOR_LINE}, "border": {"color": COLOR_LINE}}})
         line.add_series({"name": f"Tendencia ({MOVING_AVG_WINDOW} lecturas)", "categories": cats, "values": trend,
-                         "line": {"color": COLOR_TREND, "width": 2, "dash_type": "dash"}})
-        line.set_title({"name": f"{sensor.name} en el tiempo", "name_font": {"size": 13}})
-        line.set_x_axis({"name": "Fecha y hora (UTC)", "date_axis": True, "num_format": "dd/mm hh:mm",
+                         "line": {"color": COLOR_TREND, "width": 2, "dash_type": "dash"},
+                         "marker": {"type": "none"}})
+        line.set_title({"name": f"{sensor.name}: valor contra tiempo", "name_font": {"size": 13}})
+        # Ejes ajustados a los datos (si no, Excel/LibreOffice arrancan en 0 o
+        # agregan márgenes enormes y la variación se ve plana).
+        _serial = lambda dt: (dt - datetime(1899, 12, 30)).total_seconds() / 86400
+        pad = (v_max - v_min) * 0.1 or max(abs(v_max) * 0.05, 1.0)
+        x_min, x_max = _serial(times[0]), _serial(times[-1])
+        if x_max <= x_min:
+            x_max = x_min + 1 / 1440
+        line.set_x_axis({"name": "Fecha y hora (UTC)", "num_format": "dd/mm hh:mm:ss",
+                         "min": x_min, "max": x_max,
                          "num_font": {"rotation": -45}, "major_gridlines": {"visible": False}})
         line.set_y_axis({"name": f"{sensor.sensor_type.name} ({unit})" if unit else sensor.sensor_type.name,
+                         "min": v_min - pad, "max": v_max + pad, "num_format": "0.0",
                          "major_gridlines": {"visible": True, "line": {"color": "#E5E7EB"}}})
         line.set_legend({"position": "bottom"})
         line.set_size({"width": 760, "height": 360})
-        ws.insert_chart(1, 8, line)
+        ws.insert_chart(6, 8, line)
 
         hist = workbook.add_chart({"type": "column"})
         hist.add_series({"name": "Lecturas", "categories": [sheet_name, hist_top + 1, 5, hist_top + bins, 5],
@@ -305,7 +342,12 @@ def build_readings_xlsx(queryset):
         hist.set_y_axis({"name": "Lecturas", "major_gridlines": {"visible": True, "line": {"color": "#E5E7EB"}}})
         hist.set_legend({"none": True})
         hist.set_size({"width": 760, "height": 300})
-        ws.insert_chart(21, 8, hist)
+        ws.insert_chart(26, 8, hist)
+
+        # --- dibujo del sensor + nombre, arriba de las gráficas ---
+        ws.insert_image(0, 8, _icon_path(sensor), {"x_offset": 4, "y_offset": 4, "object_position": 3})
+        ws.merge_range(1, 11, 2, 16, sensor.name, title_f)
+        ws.merge_range(3, 11, 3, 16, f"{sensor.sensor_type.name}" + (f" · {unit}" if unit else ""), subtitle_f)
 
         summaries.append({
             "sheet": sheet_name, "sensor": sensor.name, "type": sensor.sensor_type.name,

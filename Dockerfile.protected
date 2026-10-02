@@ -1,0 +1,49 @@
+# Imagen "protegida": el código del proyecto va compilado a binarios (.so) con
+# Cython y SIN los .py de lógica. Se construye UNA vez en tu máquina y solo se
+# entrega la imagen (registry privado o `docker save`), nunca el repositorio.
+#
+#   docker build -f Dockerfile.protected -t invernadero-backend:1.0 .
+#
+# Etapa 1: compila. Etapa 2: imagen final limpia, sin compilador ni fuentes.
+
+# ---------- Etapa 1: compilación ----------
+FROM python:3.13 AS build
+ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+WORKDIR /src
+
+# Cython 3.3.0 falla con este proyecto; se fija la serie 3.1 (probada).
+RUN pip install "cython==3.1.*" setuptools
+
+COPY setup.py manage.py ./
+COPY apps ./apps
+COPY config ./config
+
+RUN python setup.py \
+ && find apps config -name "*.py" ! -name "__init__.py" ! -path "*/migrations/*" -delete \
+ && find apps config -name "*.c" -delete \
+ && rm -rf build setup.py \
+ && find . -name "__pycache__" -type d -prune -exec rm -rf {} +
+
+# ---------- Etapa 2: ejecución ----------
+FROM python:3.13-slim
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DJANGO_SETTINGS_MODULE=config.settings.prod
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+# Solo lo compilado: sin setup.py, sin Cython, sin gcc, sin .py de lógica.
+COPY --from=build /src/manage.py ./manage.py
+COPY --from=build /src/apps ./apps
+COPY --from=build /src/config ./config
+
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+EXPOSE 8000
+
+# Mismo comando que docker-compose.prod.yml; se puede sobreescribir ahí.
+CMD ["sh", "-c", "python manage.py migrate --noinput && python manage.py collectstatic --noinput && daphne -b 0.0.0.0 -p 8000 config.asgi:application"]

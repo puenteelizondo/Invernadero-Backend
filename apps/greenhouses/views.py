@@ -46,4 +46,4 @@ class ZoneViewSet(GreenhouseScopedMixin, viewsets.ModelViewSet):
     serializer_class = ZoneSerializer
     permission_classes = [IsGreenhouseMember]
     filterset_fields = ["greenhouse"]
-    queryset = Zone.objects.select_related("greenhouse").all()
+    queryset = Zone.objects.select_related("greenhouse").all()  
