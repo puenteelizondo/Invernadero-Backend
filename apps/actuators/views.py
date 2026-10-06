@@ -50,6 +50,28 @@ class ActuatorViewSet(GreenhouseScopedMixin, viewsets.ModelViewSet):
         serializer = ActuatorStateChangeSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        # Si un lazo de control ACTIVO maneja este actuador, el ESP32 decide la
+        # salida: un encendido manual no llegaría al hardware y solo dejaría un
+        # estado falso en la web. Se rechaza con 409 y se dice qué lazo lo tiene.
+        from apps.control.models import ControlLoop
+
+        loop = (
+            ControlLoop.objects.filter(actuator=actuator, enabled=True)
+            .exclude(mode=ControlLoop.Mode.OFF)
+            .first()
+        )
+        if loop is not None:
+            return Response(
+                {
+                    "detail": (
+                        f"Este actuador lo controla automáticamente el lazo “{loop.name}”. "
+                        "Para manejarlo a mano, pon ese lazo en Apagado en la página Control."
+                    ),
+                    "control_loop": loop.pk,
+                },
+                status=409,
+            )
+
         changed = actuator.set_state(
             serializer.validated_data["state"],
             user=request.user,

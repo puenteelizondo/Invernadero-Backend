@@ -125,26 +125,75 @@ class Controller:
 #  Planta simulada: primer orden + retardo de transporte
 # --------------------------------------------------------------------------- #
 class Plant:
-    def __init__(self, ambient, gain, tau, delay, noise):
+    def __init__(self, ambient, gain, tau, delay, noise, disturb=0.0):
         self.pv = ambient
         self.ambient, self.gain, self.tau, self.delay, self.noise = ambient, gain, tau, delay, noise
         self.queue = deque()      # (t_efectivo, salida%)
         self.t = 0.0
         self.u_eff = 0.0
+        # Perturbaciones (sol que pega, puerta abierta, riego, una nube...): empujan la
+        # variable por encima o por debajo del setpoint y el lazo la tiene que regresar.
+        self.disturb = disturb    # tamaño máximo (en unidades de la variable); 0 = sin perturbaciones
+        self.dist = 0.0
+        self.dist_until = 0.0
+        self.next_event = random.uniform(40, 90)
+        self.event = None         # texto de la última perturbación, para imprimirlo
+
+    def _perturbaciones(self):
+        if not self.disturb:
+            return
+        if self.dist and self.t >= self.dist_until:
+            self.dist = 0.0
+            self.event = "termina la perturbación"
+        if not self.dist and self.t >= self.next_event:
+            sign = random.choice((1, -1))
+            self.dist = sign * random.uniform(0.6, 1.0) * self.disturb
+            dur = random.uniform(40, 100)
+            self.dist_until = self.t + dur
+            self.next_event = self.dist_until + random.uniform(60, 150)
+            self.event = f"perturbación {'+' if sign > 0 else '−'}{abs(self.dist):.4g} durante {dur:.0f} s simulados"
 
     def step(self, u, dt, direction):
         self.t += dt
+        self._perturbaciones()
         self.queue.append((self.t + self.delay, u))
         while self.queue and self.queue[0][0] <= self.t:
             self.u_eff = self.queue.popleft()[1]
         # direct: la salida SUBE la variable (calefactor); reverse: la BAJA (ventilador).
         g = self.gain if direction == "direct" else -self.gain
-        d = (-(self.pv - self.ambient) + g * self.u_eff / 100.0) / self.tau
+        d = (-(self.pv - self.ambient) + g * self.u_eff / 100.0 + self.dist) / self.tau
         self.pv += d * dt
         return self.pv + random.gauss(0, self.noise)
 
 
 # --------------------------------------------------------------------------- #
+def _escala(cfg):
+    """Tamaño típico de la variable, para que la planta tenga sentido en sus unidades
+    (no es lo mismo 25 °C que 2500 ppm de CO2 o 100000 lux)."""
+    return max(abs(float(cfg.get("setpoint") or 0)), 1.0)
+
+
+def plant_params(a, cfg):
+    """(ambiente, ganancia) de la planta simulada de ESTE lazo.
+
+    Si no se pasan --ambient / --gain, se eligen a partir del setpoint: la variable
+    arranca lejos del setpoint (40 % abajo si la salida la sube, 40 % arriba si la
+    baja) y con salida al 100 % puede pasarse un poco, así se ve al lazo trabajar.
+    """
+    s = _escala(cfg)
+    sp = float(cfg.get("setpoint") or 0)
+    if a.ambient is not None:
+        ambient = a.ambient
+    else:
+        ambient = sp - 0.4 * s if cfg.get("direction", "direct") == "direct" else sp + 0.4 * s
+    gain = a.gain if a.gain is not None else 0.8 * s
+    return ambient, gain
+
+
+def noise_param(a, cfg):
+    return (a.noise if a.noise is not None else 0.002 * _escala(cfg),)
+
+
 async def post_json(url, key, body):
     def _do():
         req = urllib.request.Request(
@@ -173,7 +222,8 @@ async def run_session(a):
                 loops[lid]["ctrl"].apply(cfg)
                 loops[lid]["cfg"] = cfg
             else:
-                plant = Plant(a.ambient, a.gain, a.tau, a.delay, a.noise)
+                plant = Plant(*plant_params(a, cfg), a.tau, a.delay, *noise_param(a, cfg),
+                              disturb=0.0 if a.sin_perturbaciones else 0.5 * _escala(cfg))
                 loops[lid] = {"ctrl": Controller(cfg), "plant": plant, "cfg": cfg,
                               "next": 0.0, "last": time.monotonic()}
             return lid
@@ -220,6 +270,10 @@ async def run_session(a):
                     pv = plant.pv
                     out = ctrl.step(pv, dt)
                     L["pv_meas"] = plant.step(out, dt, cfg["direction"])
+                    if plant.event:
+                        print(f"  ~ lazo {lid} “{cfg.get('name', '')}”: {plant.event} "
+                              f"(medición {plant.pv:.4g}, setpoint {cfg['setpoint']:.4g}, salida {out:.0f} %)")
+                        plant.event = None
                     await ws.send(json.dumps({
                         "event": "telemetry", "loop_id": lid, "version": cfg["version"],
                         "pv": round(pv, 3), "setpoint": cfg["setpoint"], "output": round(out, 2),
@@ -246,11 +300,13 @@ async def main():
     ap.add_argument("--url", default="http://localhost:8000", help="base del backend")
     ap.add_argument("--key", required=True, help="API key completa del dispositivo")
     ap.add_argument("--speed", type=float, default=5.0, help="aceleración de la planta (1 = tiempo real)")
-    ap.add_argument("--ambient", type=float, default=18.0, help="valor inicial/ambiente de la variable")
-    ap.add_argument("--gain", type=float, default=15.0, help="cuánto cambia la variable con salida 100%% (en régimen)")
+    ap.add_argument("--ambient", type=float, default=None, help="valor inicial/ambiente de la variable (por defecto: según el setpoint de cada lazo)")
+    ap.add_argument("--gain", type=float, default=None, help="cuánto cambia la variable con salida 100%% (por defecto: según el setpoint)")
     ap.add_argument("--tau", type=float, default=120.0, help="constante de tiempo de la planta (s simulados)")
     ap.add_argument("--delay", type=float, default=8.0, help="retardo de transporte (s simulados)")
-    ap.add_argument("--noise", type=float, default=0.03, help="ruido de medición (desv. estándar)")
+    ap.add_argument("--noise", type=float, default=None, help="ruido de medición (desv. estándar; por defecto 0.2 %% del setpoint)")
+    ap.add_argument("--sin-perturbaciones", action="store_true",
+                    help="no simular perturbaciones (la variable solo se acerca al setpoint y se queda)")
     ap.add_argument("--ingest-interval", type=float, default=2.0, help="cada cuántos s se manda la lectura")
     a = ap.parse_args()
 
