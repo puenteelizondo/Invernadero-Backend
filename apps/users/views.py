@@ -3,46 +3,27 @@ from django.core.mail import send_mail
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.utils.decorators import method_decorator
-from rest_framework import generics, permissions
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import mixins, permissions, viewsets
+from rest_framework.filters import OrderingFilter, SearchFilter
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from django.contrib.auth.password_validation import validate_password
+
 from .serializers import (
+    AdminUserCreateSerializer,
+    AdminUserSerializer,
+    generate_temporary_password,
     LoginSerializer,
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
-    RegisterSerializer,
     UserSerializer,
     build_uid_and_token,
 )
 
 User = get_user_model()
-
-
-class RegisterView(generics.CreateAPIView):
-    """
-    POST /api/v1/auth/register/
-
-    Antes, crear un usuario nuevo dependía de `createsuperuser` o del
-    admin -- no había forma de que alguien se registrara por sí mismo.
-    Este endpoint es público a propósito (AllowAny, sin
-    authentication_classes): es la puerta de entrada para que un
-    cliente nuevo cree su propia cuenta.
-
-    No crea ninguna Membership ni invernadero -- eso pasa después, ya
-    sea porque el usuario registra su propio invernadero (ver
-    GreenhouseViewSet.perform_create, que sí crea una Membership OWNER
-    automáticamente) o porque alguien más lo invita a uno existente
-    (ver apps/memberships).
-
-    Comparte el AnonRateThrottle global (60/minute por IP, ver
-    config/settings/base.py) igual que cualquier otro endpoint público
-    -- no tiene un límite propio porque no hay ninguna razón para que
-    el registro necesite ser más permisivo o más estricto que el resto.
-    """
-    serializer_class = RegisterSerializer
-    permission_classes = [permissions.AllowAny]
-    authentication_classes = []
 
 
 class PasswordResetRequestView(APIView):
@@ -180,3 +161,74 @@ class MeView(APIView):
 
     def get(self, request):
         return Response(UserSerializer(request.user).data)
+
+
+class AdminUserViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    """
+    /api/v1/admin/users/  -- gestión de cuentas, SOLO para staff.
+
+    Es la única vía para crear usuarios: el registro público fue cerrado.
+    No hay DELETE a propósito: una cuenta con historial (cambios de
+    actuadores, auditoría de lazos) no se borra, se DESACTIVA
+    (`is_active=false`), lo que además impide iniciar sesión.
+
+    Acciones:
+      GET    /admin/users/?search=            lista (con buscador)
+      POST   /admin/users/                    crea (devuelve la contraseña
+                                              temporal UNA sola vez si se generó)
+      PATCH  /admin/users/{id}/               email, is_staff, is_active
+      POST   /admin/users/{id}/reset-password/  genera otra contraseña temporal
+    """
+
+    permission_classes = [permissions.IsAdminUser]
+    queryset = User.objects.all().order_by("username")
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    search_fields = ["username", "email", "first_name", "last_name"]
+    filterset_fields = ["is_staff", "is_active"]
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return AdminUserCreateSerializer
+        return AdminUserSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        data = AdminUserSerializer(user).data
+        # La temporal sale en la respuesta una sola vez; no se guarda en claro.
+        data["temporary_password"] = getattr(user, "_temporary_password", None)
+        return Response(data, status=201)
+
+    def perform_update(self, serializer):
+        target = serializer.instance
+        if target.pk == self.request.user.pk:
+            incoming = serializer.validated_data
+            if incoming.get("is_active") is False or incoming.get("is_staff") is False:
+                from rest_framework.exceptions import ValidationError
+
+                raise ValidationError(
+                    "No puedes desactivarte ni quitarte el rol de administrador a ti mismo."
+                )
+        serializer.save()
+
+    @action(detail=True, methods=["post"], url_path="reset-password")
+    def reset_password(self, request, pk=None):
+        user = self.get_object()
+        raw = request.data.get("password") if hasattr(request.data, "get") else None
+        generated = not raw
+        raw = raw or generate_temporary_password()
+        if not generated:
+            validate_password(raw, user)
+        user.set_password(raw)
+        user.save(update_fields=["password"])
+        return Response(
+            {"id": user.pk, "username": user.username, "temporary_password": raw if generated else None}
+        )

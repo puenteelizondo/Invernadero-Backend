@@ -18,6 +18,7 @@ _NOMBRES = {
     "SensorType": ("tipo de sensor", "tipos de sensor"),
     "ActuatorType": ("tipo de actuador", "tipos de actuador"),
     "Membership": ("membresía", "membresías"),
+    "ControlLoop": ("lazo de control", "lazos de control"),
 }
 
 

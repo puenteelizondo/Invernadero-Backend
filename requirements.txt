@@ -8,3 +8,5 @@ channels==4.3.2
 channels-redis==4.3.0
 daphne==4.2.3
 XlsxWriter==3.2.9
+# Solo para scripts/simulate_controller.py (simular un ESP32 sin hardware)
+websockets==17.2

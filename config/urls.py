@@ -5,6 +5,9 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/v1/", include("apps.users.urls")),
     path("api/v1/", include("apps.greenhouses.urls")),
+    # control ANTES que sensors: sus rutas devices/ws-token/ y devices/control-config/
+    # deben ganarle al router de devices/<pk>/.
+    path("api/v1/", include("apps.control.urls")),
     path("api/v1/", include("apps.sensors.urls")),
     path("api/v1/", include("apps.actuators.urls")),
     path("api/v1/", include("apps.readings.urls")),

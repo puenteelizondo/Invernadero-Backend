@@ -73,6 +73,7 @@ INSTALLED_APPS = [
     "apps.actuators",
     "apps.memberships",
     "apps.alerts",
+    "apps.control",
 ]
 
 MIDDLEWARE = [
@@ -209,6 +210,8 @@ REST_FRAMEWORK = {
         "anon": "60/minute",
         "user": "300/minute",
         "device": "120/minute",
+        # Cambios de configuración de lazos de control (PATCH/POST desde la web).
+        "control_write": "60/minute",
     },
 }
 

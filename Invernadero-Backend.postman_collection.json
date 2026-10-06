@@ -1,376 +1,854 @@
 {
-  "info": {
-    "name": "Invernadero-Backend",
-    "description": "Colección completa de la API de Invernadero-Backend (Django/DRF). Usa las variables de la colección (base_url, username, password) y, para los endpoints de dispositivo, device_key. La autenticación por defecto de la colección es Basic Auth con {{username}}/{{password}}; los endpoints de sesión (login/logout/me/csrf) y los de dispositivo (X-Device-Key) se documentan aparte porque no usan ese esquema.",
-    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
-  },
-  "variable": [
-    { "key": "base_url", "value": "http://localhost:8000/api/v1" },
-    { "key": "username", "value": "cliente1" },
-    { "key": "password", "value": "cambia-esto" },
-    { "key": "device_key", "value": "pega-aqui-la-api_key-de-un-device" },
-    { "key": "greenhouse_id", "value": "1" },
-    { "key": "sensor_id", "value": "1" },
-    { "key": "actuator_id", "value": "1" },
-    { "key": "device_id", "value": "1" },
-    { "key": "membership_id", "value": "1" }
-  ],
-  "auth": {
-    "type": "basic",
-    "basic": [
-      { "key": "username", "value": "{{username}}", "type": "string" },
-      { "key": "password", "value": "{{password}}", "type": "string" }
-    ]
-  },
-  "item": [
-    {
-      "name": "Autenticación",
-      "item": [
-        {
-          "name": "Registro público",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "auth": { "type": "noauth" },
-            "url": "{{base_url}}/auth/register/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"username\": \"nuevo_cliente\",\n  \"email\": \"nuevo_cliente@example.com\",\n  \"password\": \"una-contraseña-segura-123\"\n}"
-            }
-          }
-        },
-        {
-          "name": "Recuperar contraseña - pedir enlace",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "auth": { "type": "noauth" },
-            "url": "{{base_url}}/auth/password-reset/",
-            "body": { "mode": "raw", "raw": "{\n  \"email\": \"cliente1@example.com\"\n}" }
-          }
-        },
-        {
-          "name": "Recuperar contraseña - confirmar",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "auth": { "type": "noauth" },
-            "url": "{{base_url}}/auth/password-reset/confirm/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"uid\": \"pega-aqui-el-uid-del-enlace-del-correo\",\n  \"token\": \"pega-aqui-el-token-del-enlace-del-correo\",\n  \"password\": \"mi-nueva-contraseña-456\"\n}"
-            }
-          }
-        },
-        {
-          "name": "Cookie CSRF (para login/logout de sesión)",
-          "request": {
-            "method": "GET",
-            "auth": { "type": "noauth" },
-            "url": "{{base_url}}/auth/csrf/",
-            "description": "Pide la cookie 'csrftoken'. Necesario antes de login/logout de sesión si vas a probarlos desde Postman con 'Send cookies' activado, igual que hace el frontend con ensureCsrfCookie()."
-          }
-        },
-        {
-          "name": "Login (sesión + cookie)",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" },
-              { "key": "X-CSRFToken", "value": "{{csrf_token}}" }
-            ],
-            "auth": { "type": "noauth" },
-            "url": "{{base_url}}/auth/login/",
-            "body": { "mode": "raw", "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}" },
-            "description": "Crea una sesión (cookie sessionid) en vez de usar Basic Auth. Pensado para el frontend, no para Postman -- se incluye para poder probar el endpoint tal cual lo usa el frontend. Requiere haber pedido antes la cookie CSRF y mandarla como header X-CSRFToken."
-          }
-        },
-        {
-          "name": "Quién soy (/auth/me/)",
-          "request": {
-            "method": "GET",
-            "auth": { "type": "noauth" },
-            "url": "{{base_url}}/auth/me/",
-            "description": "Usa la sesión (cookie) creada por Login. Con Basic Auth (el default de la colección) también funciona, ya que es solo IsAuthenticated."
-          }
-        },
-        {
-          "name": "Logout (sesión)",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "X-CSRFToken", "value": "{{csrf_token}}" }],
-            "auth": { "type": "noauth" },
-            "url": "{{base_url}}/auth/logout/"
-          }
-        }
-      ]
-    },
-    {
-      "name": "Invernaderos y zonas",
-      "item": [
-        {
-          "name": "Listar invernaderos",
-          "request": { "method": "GET", "url": "{{base_url}}/greenhouses/" }
-        },
-        {
-          "name": "Crear invernadero (te vuelve Owner)",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/greenhouses/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"Invernadero Norte\",\n  \"description\": \"Tomates y pimientos\",\n  \"timezone\": \"America/Mexico_City\"\n}"
-            }
-          }
-        },
-        {
-          "name": "Detalle de invernadero",
-          "request": { "method": "GET", "url": "{{base_url}}/greenhouses/{{greenhouse_id}}/" }
-        },
-        {
-          "name": "Actualizar invernadero",
-          "request": {
-            "method": "PATCH",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/greenhouses/{{greenhouse_id}}/",
-            "body": { "mode": "raw", "raw": "{\n  \"description\": \"Actualizado desde Postman\"\n}" }
-          }
-        },
-        {
-          "name": "Eliminar invernadero",
-          "request": { "method": "DELETE", "url": "{{base_url}}/greenhouses/{{greenhouse_id}}/" }
-        },
-        {
-          "name": "Crear zona",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/zones/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"greenhouse\": {{greenhouse_id}},\n  \"name\": \"Zona A\",\n  \"description\": \"Mesa de cultivo 1\"\n}"
-            }
-          }
-        },
-        {
-          "name": "Listar zonas de un invernadero",
-          "request": { "method": "GET", "url": "{{base_url}}/zones/?greenhouse={{greenhouse_id}}" }
-        }
-      ]
-    },
-    {
-      "name": "Membresías (invitar y roles)",
-      "item": [
-        {
-          "name": "Listar miembros de un invernadero",
-          "request": { "method": "GET", "url": "{{base_url}}/memberships/?greenhouse={{greenhouse_id}}" }
-        },
-        {
-          "name": "Invitar por username o email",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/memberships/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"greenhouse\": {{greenhouse_id}},\n  \"invite\": \"cliente2\",\n  \"role\": \"viewer\"\n}"
-            },
-            "description": "'invite' acepta un username o un email; alternativa a mandar 'user' con el id numérico directamente."
-          }
-        },
-        {
-          "name": "Cambiar rol de un miembro",
-          "request": {
-            "method": "PATCH",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/memberships/{{membership_id}}/",
-            "body": { "mode": "raw", "raw": "{\n  \"role\": \"operator\"\n}" }
-          }
-        },
-        {
-          "name": "Quitar acceso",
-          "request": { "method": "DELETE", "url": "{{base_url}}/memberships/{{membership_id}}/" }
-        }
-      ]
-    },
-    {
-      "name": "Catálogo de sensores",
-      "item": [
-        {
-          "name": "Listar tipos de sensor",
-          "request": { "method": "GET", "url": "{{base_url}}/sensor-types/" }
-        },
-        {
-          "name": "Crear tipo de sensor (solo staff)",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/sensor-types/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"code\": \"temperature\",\n  \"name\": \"Temperatura\",\n  \"default_unit\": \"°C\",\n  \"valid_min\": -20,\n  \"valid_max\": 80,\n  \"description\": \"Temperatura ambiente o de sustrato.\"\n}"
-            }
-          }
-        },
-        {
-          "name": "Crear sensor",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/sensors/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"Sensor de temperatura A1\",\n  \"sensor_type\": 1,\n  \"greenhouse\": {{greenhouse_id}}\n}"
-            }
-          }
-        },
-        {
-          "name": "Listar sensores de un invernadero",
-          "request": { "method": "GET", "url": "{{base_url}}/sensors/?greenhouse={{greenhouse_id}}" }
-        },
-        {
-          "name": "Actualizar sensor",
-          "request": {
-            "method": "PATCH",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/sensors/{{sensor_id}}/",
-            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Nuevo nombre\"\n}" }
-          }
-        },
-        {
-          "name": "Eliminar sensor",
-          "request": { "method": "DELETE", "url": "{{base_url}}/sensors/{{sensor_id}}/" }
-        }
-      ]
-    },
-    {
-      "name": "Dispositivos",
-      "item": [
-        {
-          "name": "Crear dispositivo (devuelve api_key una sola vez)",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/devices/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"ESP32 - Mesa A\",\n  \"greenhouse\": {{greenhouse_id}}\n}"
-            },
-            "description": "Solo el Owner del invernadero puede crear dispositivos. Copia el 'api_key' de la respuesta: no se vuelve a mostrar."
-          }
-        },
-        {
-          "name": "Listar dispositivos",
-          "request": { "method": "GET", "url": "{{base_url}}/devices/?greenhouse={{greenhouse_id}}" }
-        },
-        {
-          "name": "Rotar API key de un dispositivo",
-          "request": { "method": "POST", "url": "{{base_url}}/devices/{{device_id}}/rotate-key/" }
-        }
-      ]
-    },
-    {
-      "name": "Catálogo de actuadores",
-      "item": [
-        {
-          "name": "Listar tipos de actuador",
-          "request": { "method": "GET", "url": "{{base_url}}/actuator-types/" }
-        },
-        {
-          "name": "Crear tipo de actuador (solo staff)",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/actuator-types/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"code\": \"fan\",\n  \"name\": \"Ventilador\",\n  \"description\": \"Extracción o circulación de aire.\"\n}"
-            }
-          }
-        },
-        {
-          "name": "Crear actuador",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/actuators/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"Ventilador 1\",\n  \"actuator_type\": 1,\n  \"greenhouse\": {{greenhouse_id}}\n}"
-            }
-          }
-        },
-        {
-          "name": "Listar actuadores de un invernadero",
-          "request": { "method": "GET", "url": "{{base_url}}/actuators/?greenhouse={{greenhouse_id}}" }
-        },
-        {
-          "name": "Encender/apagar actuador (control manual)",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/actuators/{{actuator_id}}/state/",
-            "body": { "mode": "raw", "raw": "{\n  \"state\": true\n}" },
-            "description": "Requiere rol Owner u Operator (IsGreenhouseOperatorOrAbove). Un Viewer recibe 403."
-          }
-        },
-        {
-          "name": "Historial de estado de un actuador",
-          "request": { "method": "GET", "url": "{{base_url}}/actuators/{{actuator_id}}/history/" }
-        },
-        {
-          "name": "Eliminar actuador",
-          "request": { "method": "DELETE", "url": "{{base_url}}/actuators/{{actuator_id}}/" }
-        }
-      ]
-    },
-    {
-      "name": "Lecturas",
-      "item": [
-        {
-          "name": "Ingesta de lectura (dispositivo, X-Device-Key)",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" },
-              { "key": "X-Device-Key", "value": "{{device_key}}" }
-            ],
-            "auth": { "type": "noauth" },
-            "url": "{{base_url}}/readings/ingest/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"sensor_id\": {{sensor_id}},\n  \"value\": 23.5\n}"
-            },
-            "description": "Autenticado con la api_key del DISPOSITIVO (header X-Device-Key), no con el usuario/Basic Auth de la colección. También acepta un lote: {\"readings\": [{...}, {...}]}."
-          }
-        },
-        {
-          "name": "Listar lecturas de un sensor",
-          "request": { "method": "GET", "url": "{{base_url}}/readings/?sensor={{sensor_id}}" }
-        },
-        {
-          "name": "Exportar lecturas a Excel",
-          "request": {
-            "method": "GET",
-            "url": "{{base_url}}/readings/export/?date_from=2026-09-01T00:00:00Z&date_to=2026-09-30T23:59:59Z",
-            "description": "date_from/date_to son obligatorios; 'sensor' es opcional. Se limita solo a invernaderos de los que eres miembro. Devuelve el archivo .xlsx directamente (en Postman: botón 'Send and Download')."
-          }
-        }
-      ]
-    },
-    {
-      "name": "Tiempo real / WebSocket",
-      "item": [
-        {
-          "name": "Pedir token de WebSocket",
-          "request": {
-            "method": "POST",
-            "url": "{{base_url}}/realtime/ws-token/",
-            "description": "Sin body. Devuelve {token, expires_in}. El token dura 30 segundos y se consume en el primer intento de conexión -- pídelo justo antes de conectar. Para conectar el WebSocket (no soportado directamente desde una request HTTP normal de Postman): usa un cliente WS a ws://localhost:8000/ws/greenhouses/{{greenhouse_id}}/?token=<token>, o revisa el frontend (src/hooks/useRealtime.ts)."
-          }
-        }
-      ]
-    }
-  ]
+	"info": {
+		"name": "Invernadero-Backend",
+		"description": "Colección completa de la API de Invernadero-Backend (Django/DRF). Usa las variables de la colección (base_url, username, password) y, para los endpoints de dispositivo, device_key. La autenticación por defecto de la colección es Basic Auth con {{username}}/{{password}}; los endpoints de sesión (login/logout/me/csrf) y los de dispositivo (X-Device-Key) se documentan aparte porque no usan ese esquema.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8000/api/v1"
+		},
+		{
+			"key": "username",
+			"value": "cliente1"
+		},
+		{
+			"key": "password",
+			"value": "cambia-esto"
+		},
+		{
+			"key": "device_key",
+			"value": "pega-aqui-la-api_key-de-un-device"
+		},
+		{
+			"key": "greenhouse_id",
+			"value": "1"
+		},
+		{
+			"key": "sensor_id",
+			"value": "1"
+		},
+		{
+			"key": "actuator_id",
+			"value": "1"
+		},
+		{
+			"key": "device_id",
+			"value": "1"
+		},
+		{
+			"key": "membership_id",
+			"value": "1"
+		},
+		{
+			"key": "user_id",
+			"value": "1"
+		},
+		{
+			"key": "loop_id",
+			"value": "1"
+		}
+	],
+	"auth": {
+		"type": "basic",
+		"basic": [
+			{
+				"key": "username",
+				"value": "{{username}}",
+				"type": "string"
+			},
+			{
+				"key": "password",
+				"value": "{{password}}",
+				"type": "string"
+			}
+		]
+	},
+	"item": [
+		{
+			"name": "Autenticación",
+			"item": [
+				{
+					"name": "Recuperar contraseña - pedir enlace",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"auth": {
+							"type": "noauth"
+						},
+						"url": "{{base_url}}/auth/password-reset/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"cliente1@example.com\"\n}"
+						}
+					}
+				},
+				{
+					"name": "Recuperar contraseña - confirmar",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"auth": {
+							"type": "noauth"
+						},
+						"url": "{{base_url}}/auth/password-reset/confirm/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"uid\": \"pega-aqui-el-uid-del-enlace-del-correo\",\n  \"token\": \"pega-aqui-el-token-del-enlace-del-correo\",\n  \"password\": \"mi-nueva-contraseña-456\"\n}"
+						}
+					}
+				},
+				{
+					"name": "Cookie CSRF (para login/logout de sesión)",
+					"request": {
+						"method": "GET",
+						"auth": {
+							"type": "noauth"
+						},
+						"url": "{{base_url}}/auth/csrf/",
+						"description": "Pide la cookie 'csrftoken'. Necesario antes de login/logout de sesión si vas a probarlos desde Postman con 'Send cookies' activado, igual que hace el frontend con ensureCsrfCookie()."
+					}
+				},
+				{
+					"name": "Login (sesión + cookie)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-CSRFToken",
+								"value": "{{csrf_token}}"
+							}
+						],
+						"auth": {
+							"type": "noauth"
+						},
+						"url": "{{base_url}}/auth/login/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+						},
+						"description": "Crea una sesión (cookie sessionid) en vez de usar Basic Auth. Pensado para el frontend, no para Postman -- se incluye para poder probar el endpoint tal cual lo usa el frontend. Requiere haber pedido antes la cookie CSRF y mandarla como header X-CSRFToken."
+					}
+				},
+				{
+					"name": "Quién soy (/auth/me/)",
+					"request": {
+						"method": "GET",
+						"auth": {
+							"type": "noauth"
+						},
+						"url": "{{base_url}}/auth/me/",
+						"description": "Usa la sesión (cookie) creada por Login. Con Basic Auth (el default de la colección) también funciona, ya que es solo IsAuthenticated."
+					}
+				},
+				{
+					"name": "Logout (sesión)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "X-CSRFToken",
+								"value": "{{csrf_token}}"
+							}
+						],
+						"auth": {
+							"type": "noauth"
+						},
+						"url": "{{base_url}}/auth/logout/"
+					}
+				}
+			]
+		},
+		{
+			"name": "Usuarios (solo administradores)",
+			"description": "El registro público está cerrado. Requiere sesión de un usuario is_staff.",
+			"item": [
+				{
+					"name": "Listar usuarios",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/admin/users/?search=&is_active=true",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"admin",
+								"users"
+							],
+							"query": [
+								{
+									"key": "search",
+									"value": ""
+								},
+								{
+									"key": "is_active",
+									"value": "true"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Crear usuario (sin password → temporal, se muestra una vez)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/admin/users/",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"admin",
+								"users"
+							]
+						},
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"username\": \"operador1\",\n  \"email\": \"op@example.com\",\n  \"first_name\": \"Ana\",\n  \"last_name\": \"Pérez\",\n  \"is_staff\": false\n}"
+						}
+					}
+				},
+				{
+					"name": "Editar usuario / desactivar",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/admin/users/{{user_id}}/",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"admin",
+								"users",
+								"{{user_id}}"
+							]
+						},
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"is_active\": false\n}"
+						}
+					}
+				},
+				{
+					"name": "Generar contraseña temporal",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/admin/users/{{user_id}}/reset-password/",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"admin",
+								"users",
+								"{{user_id}}",
+								"reset-password"
+							]
+						},
+						"body": {
+							"mode": "raw",
+							"raw": "{}"
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Invernaderos y zonas",
+			"item": [
+				{
+					"name": "Listar invernaderos",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/greenhouses/"
+					}
+				},
+				{
+					"name": "Crear invernadero (te vuelve Owner)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": "{{base_url}}/greenhouses/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Invernadero Norte\",\n  \"description\": \"Tomates y pimientos\",\n  \"timezone\": \"America/Mexico_City\"\n}"
+						}
+					}
+				},
+				{
+					"name": "Detalle de invernadero",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/greenhouses/{{greenhouse_id}}/"
+					}
+				},
+				{
+					"name": "Actualizar invernadero",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": "{{base_url}}/greenhouses/{{greenhouse_id}}/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"description\": \"Actualizado desde Postman\"\n}"
+						}
+					}
+				},
+				{
+					"name": "Eliminar invernadero",
+					"request": {
+						"method": "DELETE",
+						"url": "{{base_url}}/greenhouses/{{greenhouse_id}}/"
+					}
+				},
+				{
+					"name": "Crear zona",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": "{{base_url}}/zones/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"greenhouse\": {{greenhouse_id}},\n  \"name\": \"Zona A\",\n  \"description\": \"Mesa de cultivo 1\"\n}"
+						}
+					}
+				},
+				{
+					"name": "Listar zonas de un invernadero",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/zones/?greenhouse={{greenhouse_id}}"
+					}
+				}
+			]
+		},
+		{
+			"name": "Membresías (invitar y roles)",
+			"item": [
+				{
+					"name": "Listar miembros de un invernadero",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/memberships/?greenhouse={{greenhouse_id}}"
+					}
+				},
+				{
+					"name": "Invitar por username o email",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": "{{base_url}}/memberships/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"greenhouse\": {{greenhouse_id}},\n  \"invite\": \"cliente2\",\n  \"role\": \"viewer\"\n}"
+						},
+						"description": "'invite' acepta un username o un email; alternativa a mandar 'user' con el id numérico directamente."
+					}
+				},
+				{
+					"name": "Cambiar rol de un miembro",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": "{{base_url}}/memberships/{{membership_id}}/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"role\": \"operator\"\n}"
+						}
+					}
+				},
+				{
+					"name": "Quitar acceso",
+					"request": {
+						"method": "DELETE",
+						"url": "{{base_url}}/memberships/{{membership_id}}/"
+					}
+				}
+			]
+		},
+		{
+			"name": "Catálogo de sensores",
+			"item": [
+				{
+					"name": "Listar tipos de sensor",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/sensor-types/"
+					}
+				},
+				{
+					"name": "Crear tipo de sensor (solo staff)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": "{{base_url}}/sensor-types/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"code\": \"temperature\",\n  \"name\": \"Temperatura\",\n  \"default_unit\": \"°C\",\n  \"valid_min\": -20,\n  \"valid_max\": 80,\n  \"description\": \"Temperatura ambiente o de sustrato.\"\n}"
+						}
+					}
+				},
+				{
+					"name": "Crear sensor",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": "{{base_url}}/sensors/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Sensor de temperatura A1\",\n  \"sensor_type\": 1,\n  \"greenhouse\": {{greenhouse_id}}\n}"
+						}
+					}
+				},
+				{
+					"name": "Listar sensores de un invernadero",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/sensors/?greenhouse={{greenhouse_id}}"
+					}
+				},
+				{
+					"name": "Actualizar sensor",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": "{{base_url}}/sensors/{{sensor_id}}/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Nuevo nombre\"\n}"
+						}
+					}
+				},
+				{
+					"name": "Eliminar sensor",
+					"request": {
+						"method": "DELETE",
+						"url": "{{base_url}}/sensors/{{sensor_id}}/"
+					}
+				}
+			]
+		},
+		{
+			"name": "Dispositivos",
+			"item": [
+				{
+					"name": "Crear dispositivo (devuelve api_key una sola vez)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": "{{base_url}}/devices/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"ESP32 - Mesa A\",\n  \"greenhouse\": {{greenhouse_id}}\n}"
+						},
+						"description": "Solo el Owner del invernadero puede crear dispositivos. Copia el 'api_key' de la respuesta: no se vuelve a mostrar."
+					}
+				},
+				{
+					"name": "Listar dispositivos",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/devices/?greenhouse={{greenhouse_id}}"
+					}
+				},
+				{
+					"name": "Rotar API key de un dispositivo",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url}}/devices/{{device_id}}/rotate-key/"
+					}
+				}
+			]
+		},
+		{
+			"name": "Catálogo de actuadores",
+			"item": [
+				{
+					"name": "Listar tipos de actuador",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/actuator-types/"
+					}
+				},
+				{
+					"name": "Crear tipo de actuador (solo staff)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": "{{base_url}}/actuator-types/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"code\": \"fan\",\n  \"name\": \"Ventilador\",\n  \"description\": \"Extracción o circulación de aire.\"\n}"
+						}
+					}
+				},
+				{
+					"name": "Crear actuador",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": "{{base_url}}/actuators/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Ventilador 1\",\n  \"actuator_type\": 1,\n  \"greenhouse\": {{greenhouse_id}}\n}"
+						}
+					}
+				},
+				{
+					"name": "Listar actuadores de un invernadero",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/actuators/?greenhouse={{greenhouse_id}}"
+					}
+				},
+				{
+					"name": "Encender/apagar actuador (control manual)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": "{{base_url}}/actuators/{{actuator_id}}/state/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"state\": true\n}"
+						},
+						"description": "Requiere rol Owner u Operator (IsGreenhouseOperatorOrAbove). Un Viewer recibe 403."
+					}
+				},
+				{
+					"name": "Historial de estado de un actuador",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/actuators/{{actuator_id}}/history/"
+					}
+				},
+				{
+					"name": "Eliminar actuador",
+					"request": {
+						"method": "DELETE",
+						"url": "{{base_url}}/actuators/{{actuator_id}}/"
+					}
+				}
+			]
+		},
+		{
+			"name": "Lecturas",
+			"item": [
+				{
+					"name": "Ingesta de lectura (dispositivo, X-Device-Key)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Device-Key",
+								"value": "{{device_key}}"
+							}
+						],
+						"auth": {
+							"type": "noauth"
+						},
+						"url": "{{base_url}}/readings/ingest/",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"sensor_id\": {{sensor_id}},\n  \"value\": 23.5\n}"
+						},
+						"description": "Autenticado con la api_key del DISPOSITIVO (header X-Device-Key), no con el usuario/Basic Auth de la colección. También acepta un lote: {\"readings\": [{...}, {...}]}."
+					}
+				},
+				{
+					"name": "Listar lecturas de un sensor",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/readings/?sensor={{sensor_id}}"
+					}
+				},
+				{
+					"name": "Exportar lecturas a Excel",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url}}/readings/export/?date_from=2026-09-01T00:00:00Z&date_to=2026-09-30T23:59:59Z",
+						"description": "date_from/date_to son obligatorios; 'sensor' es opcional. Se limita solo a invernaderos de los que eres miembro. Devuelve el archivo .xlsx directamente (en Postman: botón 'Send and Download')."
+					}
+				}
+			]
+		},
+		{
+			"name": "Tiempo real / WebSocket",
+			"item": [
+				{
+					"name": "Pedir token de WebSocket",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url}}/realtime/ws-token/",
+						"description": "Sin body. Devuelve {token, expires_in}. El token dura 30 segundos y se consume en el primer intento de conexión -- pídelo justo antes de conectar. Para conectar el WebSocket (no soportado directamente desde una request HTTP normal de Postman): usa un cliente WS a ws://localhost:8000/ws/greenhouses/{{greenhouse_id}}/?token=<token>, o revisa el frontend (src/hooks/useRealtime.ts)."
+					}
+				}
+			]
+		},
+		{
+			"name": "Control (lazos PID)",
+			"description": "El servidor no calcula el PID: guarda, versiona y entrega la configuración al ESP32.",
+			"item": [
+				{
+					"name": "Listar lazos de un invernadero",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/control-loops/?greenhouse={{greenhouse_id}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"control-loops"
+							],
+							"query": [
+								{
+									"key": "greenhouse",
+									"value": "{{greenhouse_id}}"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Crear lazo",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/control-loops/",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"control-loops"
+							]
+						},
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"greenhouse\": \"{{greenhouse_id}}\",\n  \"name\": \"Temperatura día\",\n  \"sensor\": \"{{sensor_id}}\",\n  \"actuator\": \"{{actuator_id}}\",\n  \"mode\": \"pid\",\n  \"direction\": \"direct\",\n  \"setpoint\": 24,\n  \"kp\": 8,\n  \"ki\": 0.2,\n  \"kd\": 2,\n  \"output_min\": 0,\n  \"output_max\": 100,\n  \"sample_time_ms\": 1000,\n  \"enabled\": true\n}"
+						}
+					}
+				},
+				{
+					"name": "Cambiar setpoint / ganancias (solo lo que cambia)",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/control-loops/{{loop_id}}/",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"control-loops",
+								"{{loop_id}}"
+							]
+						},
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"setpoint\": 25.5,\n  \"kp\": 10\n}"
+						}
+					}
+				},
+				{
+					"name": "Historial de cambios de un lazo",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/control-loops/{{loop_id}}/history/",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"control-loops",
+								"{{loop_id}}",
+								"history"
+							]
+						}
+					}
+				},
+				{
+					"name": "Eliminar lazo",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/control-loops/{{loop_id}}/",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"control-loops",
+								"{{loop_id}}"
+							]
+						}
+					}
+				},
+				{
+					"name": "Dispositivo: token para /ws/device/ (X-Device-Key)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Device-Key",
+								"value": "{{device_key}}"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/devices/ws-token/",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"devices",
+								"ws-token"
+							]
+						},
+						"description": "Token de un solo uso, 30 s. Luego abrir ws://host/ws/device/?token=..."
+					}
+				},
+				{
+					"name": "Dispositivo: configuración actual (respaldo HTTP)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Device-Key",
+								"value": "{{device_key}}"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/devices/control-config/",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"devices",
+								"control-config"
+							]
+						}
+					}
+				}
+			]
+		}
+	]
 }

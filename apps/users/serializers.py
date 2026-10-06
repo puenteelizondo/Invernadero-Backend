@@ -41,46 +41,70 @@ class UserSerializer(serializers.ModelSerializer):
         fields = ["id", "username", "email", "is_staff"]
 
 
-class RegisterSerializer(serializers.ModelSerializer):
-    """
-    Para POST /api/v1/auth/register/ (ver views.py::RegisterView).
-
-    `username` ya es único por su cuenta (AbstractUser lo declara con
-    unique=True) -- ModelSerializer le agrega un UniqueValidator solo.
-    `email` NO es único en el modelo de Django por defecto, así que lo
-    validamos aquí a mano para no permitir dos cuentas con el mismo
-    correo (sin tener que tocar el modelo ni agregar una migración).
-    """
-    password = serializers.CharField(
-        write_only=True,
-        style={"input_type": "password"},
-        help_text="Se valida con AUTH_PASSWORD_VALIDATORS (misma política que usa el admin de Django).",
-    )
+class AdminUserSerializer(serializers.ModelSerializer):
+    """Lectura/edición de cuentas por un administrador."""
 
     class Meta:
         model = User
-        fields = ["id", "username", "email", "password"]
-        extra_kwargs = {"email": {"required": False}}
-
-    def validate_password(self, value):
-        # Corre las mismas 4 validaciones que ya declara
-        # AUTH_PASSWORD_VALIDATORS en settings (similitud con el
-        # usuario, longitud mínima, contraseñas comunes, no-solo-
-        # numérica) -- las mismas que aplican al crear un usuario por
-        # el admin, no una política nueva inventada para este endpoint.
-        validate_password(value)
-        return value
+        fields = [
+            "id", "username", "email", "first_name", "last_name",
+            "is_staff", "is_active", "last_login", "date_joined",
+        ]
+        read_only_fields = ["id", "username", "last_login", "date_joined"]
 
     def validate_email(self, value):
-        if value and User.objects.filter(email__iexact=value).exists():
+        qs = User.objects.filter(email__iexact=value) if value else User.objects.none()
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
             raise serializers.ValidationError("Ya existe una cuenta con este email.")
         return value
 
+
+def generate_temporary_password() -> str:
+    """Contraseña temporal legible (sin caracteres ambiguos) que cumple los validadores."""
+    import secrets
+
+    alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(14))
+
+
+class AdminUserCreateSerializer(AdminUserSerializer):
+    """
+    Alta de usuario por un administrador (POST /api/v1/admin/users/).
+
+    `password` es opcional: si no se manda, se genera una temporal que la
+    respuesta muestra una sola vez. Se valida con AUTH_PASSWORD_VALIDATORS.
+    """
+
+    password = serializers.CharField(
+        write_only=True, required=False, allow_blank=True, style={"input_type": "password"}
+    )
+
+    class Meta(AdminUserSerializer.Meta):
+        fields = AdminUserSerializer.Meta.fields + ["password"]
+        read_only_fields = ["id", "last_login", "date_joined"]
+        extra_kwargs = {"email": {"required": False}}
+
+    def validate(self, attrs):
+        raw = attrs.get("password")
+        if raw:
+            probe = User(username=attrs.get("username", ""), email=attrs.get("email", ""))
+            try:
+                validate_password(raw, probe)
+            except Exception as exc:  # DjangoValidationError -> 400 de DRF
+                raise serializers.ValidationError({"password": list(getattr(exc, "messages", [str(exc)]))})
+        return attrs
+
     def create(self, validated_data):
-        password = validated_data.pop("password")
+        raw = validated_data.pop("password", "") or ""
+        generated = not raw
+        if generated:
+            raw = generate_temporary_password()
         user = User(**validated_data)
-        user.set_password(password)
+        user.set_password(raw)
         user.save()
+        user._temporary_password = raw if generated else None
         return user
 
 

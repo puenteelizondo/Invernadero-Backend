@@ -43,7 +43,7 @@ Construido con Django + Django REST Framework + Django Channels, sobre PostgreSQ
 
 **Base de datos.** PostgreSQL, con 6 apps de Django que se reparten los modelos: `users`, `greenhouses`, `sensors`, `actuators`, `readings`, `memberships`.
 
-**Autenticación.** DRF con `SessionAuthentication` + `BasicAuthentication` para usuarios, más endpoints propios de registro (`/auth/register/`), login/logout de sesión con cookie + CSRF (`/auth/login/`, `/auth/logout/`, `/auth/csrf/`, `/auth/me/`) y recuperación de contraseña (`/auth/password-reset/`); un esquema propio por API key (header `X-Device-Key`) para dispositivos físicos que solo envían lecturas. No hay JWT (ver [Autenticación](#autenticación)).
+**Autenticación.** DRF con `SessionAuthentication` + `BasicAuthentication` para usuarios, más gestión de cuentas solo para administradores (`/admin/users/`; el registro público está cerrado), login/logout de sesión con cookie + CSRF (`/auth/login/`, `/auth/logout/`, `/auth/csrf/`, `/auth/me/`) y recuperación de contraseña (`/auth/password-reset/`); un esquema propio por API key (header `X-Device-Key`) para dispositivos físicos que solo envían lecturas. No hay JWT (ver [Autenticación](#autenticación)).
 
 **API.** REST bajo `/api/v1/`, organizada por recurso: invernaderos, zonas, tipos de sensor, dispositivos, sensores, tipos de actuador, actuadores, lecturas, membresías.
 
@@ -439,7 +439,7 @@ Configurado en `REST_FRAMEWORK` dentro de `config/settings/base.py`. Existen **d
 - **BasicAuthentication**: usuario y contraseña en cada petición (header `Authorization: Basic <base64(usuario:contraseña)>`). Es lo que se usa para probar la API con Postman o desde un script.
 - **SessionAuthentication**: usa la cookie de sesión de Django. Permite navegar la API desde el navegador después de iniciar sesión en `/admin/` o en `/api-auth/login/` (esta última ruta, montada en `config/urls.py`, es explícitamente solo para navegar la API en desarrollo — no la usa Postman ni un frontend real).
 - **No hay JWT, ni tokens de acceso/refresh, ni verificación de email.**
-- **Registro público**: `POST /api/v1/auth/register/` (`apps/users/views.py::RegisterView`) — endpoint público (`AllowAny`, sin autenticación previa) para que un usuario nuevo cree su propia cuenta, sin depender de `createsuperuser`/admin. La contraseña se valida con las mismas 4 reglas de `AUTH_PASSWORD_VALIDATORS` que ya usaba el admin (similitud con datos del usuario, longitud mínima, contraseñas comunes, no-solo-numérica). No crea ninguna `Membership` ni invernadero — eso pasa después, cuando el usuario crea su propio invernadero (se vuelve Owner automáticamente) o alguien lo invita a uno existente.
+- **Registro cerrado**: ya no existe `POST /api/v1/auth/register/` (responde 404). Las cuentas las crea un administrador (`is_staff`) desde `/api/v1/admin/users/` (`apps/users/views.py::AdminUserViewSet`) o desde el admin de Django. El primer administrador se crea con `python manage.py createsuperuser`. Al crear una cuenta se puede mandar una contraseña o dejar que el servidor genere una temporal, que se devuelve **una sola vez**.
 
   **Request**:
   ```json
@@ -568,7 +568,9 @@ Ver [Autenticación](#autenticación) para el detalle completo de cada uno; resu
 
 | Endpoint | Método | Auth previa | Para qué |
 |---|---|---|---|
-| `/api/v1/auth/register/` | POST | Ninguna (`AllowAny`) | Crear una cuenta nueva. |
+| `/api/v1/admin/users/` | GET, POST | Staff | Listar (con `?search=`, `?is_active=`, `?is_staff=`, `?ordering=`) y crear cuentas. Si no mandas `password`, responde con `temporary_password` una sola vez. |
+| `/api/v1/admin/users/{id}/` | GET, PATCH | Staff | Ver / editar (nombre, email, `is_active`, `is_staff`). Un admin no puede desactivarse ni quitarse el staff a sí mismo. No hay DELETE: se desactiva. |
+| `/api/v1/admin/users/{id}/reset-password/` | POST | Staff | Genera una contraseña temporal nueva (o usa la que mandes). |
 | `/api/v1/auth/csrf/` | GET | Ninguna | Poner la cookie `csrftoken` antes de un login de sesión. |
 | `/api/v1/auth/login/` | POST | Ninguna | Crear una sesión (cookie `sessionid`) con usuario/contraseña. |
 | `/api/v1/auth/logout/` | POST | Sesión o Basic | Cerrar la sesión actual. |
@@ -1024,6 +1026,76 @@ ws.onmessage = (msg) => {
 
 ---
 
+## Control automático (lazos PID)
+
+App nueva: `apps/control/`. **El servidor no calcula el PID**: el cálculo corre en el ESP32. El servidor solo guarda la configuración de cada lazo, la versiona, se la entrega al dispositivo por WebSocket y reenvía la telemetría a la web. La telemetría **no** se guarda como `Reading` (solo vive 120 s en caché).
+
+### Modelo
+
+`ControlLoop` (un lazo por actuador, restricción única): `greenhouse`, `name`, `sensor`, `actuator`, `device` (se deduce del sensor/actuador; si son de dispositivos distintos → 400), `mode` (`off`, `on_off`, `p`, `pi`, `pid`), `direction` (`direct` = la salida sube la variable, p. ej. calefactor; `reverse` = la baja, p. ej. ventilador), `setpoint` (validado contra `valid_min/valid_max` del tipo de sensor), `hysteresis`, `kp`, `ki`, `kd`, `output_min`/`output_max` (0–100 %, min < max), `integral_limit`, `sample_time_ms` (100–60000), `enabled`, `version`, `applied_version`, `applied_at`, `updated_by`.
+
+- `version` sube **solo** si cambió algún parámetro de configuración; un PATCH con los mismos valores no hace nada.
+- `ControlLoopChange` guarda cada cambio como `{campo: {before, after}}` con usuario y fecha.
+- Migración: `control.0001_initial` (solo agrega tablas).
+
+### Permisos
+
+Owner y operator crean y editan lazos; viewer solo los ve; staff todo. Se valida en el backend (`CanEditControlLoops`). Las escrituras tienen throttle propio `control_write` (60/min).
+
+`GreenhouseSerializer` expone ahora `my_role` (`owner` / `operator` / `viewer`; el staff cuenta como `owner`) para que la web sepa qué mostrar editable.
+
+### Endpoints
+
+| Endpoint | Método | Auth | Para qué |
+|---|---|---|---|
+| `/api/v1/control-loops/?greenhouse=<id>` | GET, POST | Sesión (miembro) | Listar / crear lazos. |
+| `/api/v1/control-loops/{id}/` | GET, PATCH, DELETE | Sesión | Ver / editar (manda solo lo que cambia) / borrar. |
+| `/api/v1/control-loops/{id}/history/` | GET | Sesión | Últimos cambios de configuración. |
+| `/api/v1/devices/ws-token/` | POST | `X-Device-Key` | Token de un solo uso (30 s) para abrir el WebSocket del dispositivo. |
+| `/api/v1/devices/control-config/` | GET | `X-Device-Key` | Respaldo HTTP: la configuración actual de todos los lazos del dispositivo. |
+
+### WebSocket del dispositivo: `/ws/device/?token=<token>`
+
+Todos los mensajes son JSON con la clave `"event"`.
+
+Servidor → dispositivo:
+
+| `event` | Contenido | Cuándo |
+|---|---|---|
+| `config` | `{"loops": [...]}` | Al conectar (todos los lazos del dispositivo). |
+| `config_update` | `{"loop": {...}}` | Al crear o cambiar un lazo. |
+| `config_remove` | `{"loop_id": 3}` | Al borrar un lazo. |
+| `ping` | — | Cada 25 s. Si no llega nada del dispositivo en 75 s, se cierra con código 4408. |
+
+Dispositivo → servidor:
+
+| `event` | Contenido | Efecto |
+|---|---|---|
+| `hello` | `{"firmware": "..."}` | Informativo. |
+| `ack` | `{"loop_id", "version"}` | Marca `applied_version`; la web muestra "Aplicado por el ESP32". |
+| `telemetry` | `{"loop_id", "version", "pv", "setpoint", "output", "error", "p", "i", "d", "mode"}` | Se reenvía a la web (máx. 1 cada 0.5 s por lazo). Si `output > 1 %` el actuador se marca encendido (`source="automation"`), si no, apagado; solo cuando cambia. |
+| `pong` | — | Mantiene viva la conexión. |
+
+El WebSocket de dispositivos no pasa por el chequeo de `Origin` (ni siquiera en producción): un ESP32 no es un navegador y no lo manda; su protección es el token de un solo uso.
+
+Al grupo del invernadero (el WebSocket de la web) se le mandan `control_loop_updated`, `control_loop_applied`, `control_loop_deleted`, `control_telemetry` y `device_connection`.
+
+### Probar sin hardware: simulador
+
+`scripts/simulate_controller.py` se comporta como un ESP32: pide el token, abre el WebSocket, aplica la configuración que le llega, simula una planta térmica de primer orden, calcula el PID localmente y manda `ack` + `telemetry`.
+
+```bash
+pip install websockets
+python scripts/simulate_controller.py --key <API_KEY_DEL_DISPOSITIVO> --speed 5
+# --url http://localhost:8000 (por defecto)   --speed acelera el tiempo simulado
+```
+
+La variable simulada se manda como lectura por la ingesta normal (`POST /api/v1/readings/ingest/` con `X-Device-Key`), igual que un sensor físico, nunca por el WebSocket. Para probar con un sensor real, no lo uses en un dispositivo que ya reporta lecturas. Otras opciones: `--ambient`, `--gain`, `--tau`, `--delay`, `--noise`, `--ingest-interval`.
+
+### Firmware de referencia (ESP32)
+
+`firmware/esp32_control/esp32_control.ino` + su `README.md` (librerías, pines, cómo cargarlo con Arduino IDE o PlatformIO). PID en forma posicional con derivada sobre la medición, anti-windup, transferencia sin salto entre modos, On/Off con histéresis, salida PWM o relé por tiempo proporcional, y **fail-safe**: salida a 0 si pasan 10 s sin una lectura válida del sensor o si se pierde la configuración. Compila sin errores ni advertencias con el núcleo esp32 3.3 (placa *ESP32 Dev Module*), pero *todavía no se ha probado en hardware real*. La página **Control** de la web genera este mismo programa con los ids, pines y sensores de tu dispositivo ya puestos.
+
 ## Docker
 
 `docker-compose.yml` define tres servicios:
@@ -1208,7 +1280,7 @@ Lo que **no** está implementado (constatado por ausencia en el código, no una 
 
 - **HTTPS**: no hay `SECURE_SSL_REDIRECT`, `SESSION_COOKIE_SECURE` ni configuración similar en `base.py`/`dev.py` — depende enteramente de cómo se despliegue en producción (fuera del alcance de este código).
 - **JWT / tokens de acceso para la API HTTP**: no implementado; la única forma de autenticarse como usuario contra la API REST es Basic Auth o sesión de Django (el token de un solo uso descrito arriba es exclusivo del handshake de WebSocket, no reemplaza la autenticación HTTP).
-- ~~Registro de usuarios~~ — **resuelto**: `POST /api/v1/auth/register/`, ver [Autenticación](#autenticación).
+- ~~Registro de usuarios~~ — **cambiado**: el registro público se cerró; las cuentas las crea un administrador en `/api/v1/admin/users/`, ver [Autenticación](#autenticación).
 - ~~Recuperación de contraseña~~ — **resuelto**: `POST /api/v1/auth/password-reset/` + `POST /api/v1/auth/password-reset/confirm/`, con envío de correo (`EMAIL_BACKEND`, por defecto a consola en desarrollo); ver [Autenticación](#autenticación) y [Variables de entorno](#variables-de-entorno).
 
 ---
@@ -1240,7 +1312,7 @@ Cosas que valen la pena que sepas antes de construir el frontend o de llevar est
 - ~~WebSocket sin autenticación ni autorización~~ — **resuelto**: `GreenhouseConsumer.connect()` ahora exige un token de un solo uso emitido por `POST /api/v1/realtime/ws-token/` y valida `Membership` sobre el invernadero; ver [WebSockets](#websockets--tiempo-real).
 - **`apps/actuators/permissions.py::CanControlActuators` — resuelto/limpiado**: el archivo ya no contiene la clase, solo un comentario explicando por qué quedó sin uso (fue reemplazada por `IsGreenhouseOperatorOrAbove` de `apps/memberships/permissions.py`) y el comando para borrar el archivo por completo cuando quieras (`del apps\actuators\permissions.py` en Windows / `rm apps/actuators/permissions.py` en Linux/Mac). Nada en el proyecto lo importa.
 - ~~`REDIS_CACHE_URL` no está documentada en `.env.example`~~ — **resuelto**: ya aparece listada junto a `REDIS_URL` en `.env.example`, con comentario.
-- ~~No hay endpoint de registro ni de login de API "real"~~ — **resuelto**: `POST /api/v1/auth/register/` para registro público, `POST /api/v1/auth/password-reset/` + `/confirm/` para recuperación, y `POST /api/v1/auth/login/` + `/logout/` + `GET /api/v1/auth/me/` + `/csrf/` para login de sesión (cookie) pensado para un frontend en el navegador. Ver [Autenticación](#autenticación). Sigue dependiendo de `createsuperuser`/admin solo para crear usuarios `is_staff` — eso es intencional.
+- ~~No hay endpoint de registro ni de login de API "real"~~ — **resuelto**: `/api/v1/admin/users/` para que un administrador cree cuentas (el registro público se cerró), `POST /api/v1/auth/password-reset/` + `/confirm/` para recuperación, y `POST /api/v1/auth/login/` + `/logout/` + `GET /api/v1/auth/me/` + `/csrf/` para login de sesión (cookie) pensado para un frontend en el navegador. Ver [Autenticación](#autenticación). Sigue dependiendo de `createsuperuser`/admin solo para crear usuarios `is_staff` — eso es intencional.
 - ~~Invitar a un usuario a un invernadero requiere su `id` numérico~~ — **resuelto**: `POST /api/v1/memberships/` ahora también acepta `invite` (`username` o `email`) en vez de `user`; ver [Membresías](#membresías-appsmemberships).
 - ~~El `Dockerfile` sigue usando el servidor de desarrollo / comentario desactualizado~~ — **resuelto**: el comentario ahora explica por qué `CMD` sigue siendo `runserver` en desarrollo (no es un descuido); producción usa Daphne directo vía `docker-compose.prod.yml`.
 - ~~No hay `prod.py`, ni Dockerfile/compose de producción~~ — **resuelto** (con alcance acotado): ver [Producción](#producción). Sigue faltando un reverse proxy real y CI/CD, que dependen de dónde despliegues.
