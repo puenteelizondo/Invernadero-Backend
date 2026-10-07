@@ -13,7 +13,6 @@ de datos opcional y un botón.
 - Siempre se manda también la versión en texto plano (clientes sin HTML,
   vista previa de notificaciones, filtros de spam).
 """
-from email.mime.image import MIMEImage
 from functools import lru_cache
 from pathlib import Path
 
@@ -194,14 +193,34 @@ def render_text(*, title, paragraphs, details=None, button=None, note=None, foot
     return "\n".join(lines)
 
 
+class _EmailConIlustracion(EmailMultiAlternatives):
+    """
+    Correo HTML con la ilustración incrustada. La imagen se cuelga de la parte
+    HTML como "relacionada" (multipart/related, Content-ID), que es lo que
+    Gmail/Outlook muestran DENTRO del correo y no como archivo adjunto:
+
+        multipart/alternative
+          ├─ text/plain
+          └─ multipart/related
+               ├─ text/html        (<img src="cid:invernadero-header">)
+               └─ image/png
+    """
+
+    def message(self, **kwargs):
+        msg = super().message(**kwargs)
+        for part in msg.walk():
+            if part.get_content_type() == "text/html":
+                part.add_related(
+                    _header_png(), "image", "png", cid=f"<{HEADER_CID}>",
+                    disposition="inline", filename="invernadero.png",
+                )
+                break
+        return msg
+
+
 def build_email(to, subject, **content) -> EmailMultiAlternatives:
-    msg = EmailMultiAlternatives(subject, render_text(**content), settings.DEFAULT_FROM_EMAIL, list(to))
+    msg = _EmailConIlustracion(subject, render_text(**content), settings.DEFAULT_FROM_EMAIL, list(to))
     msg.attach_alternative(render_html(**content), "text/html")
-    msg.mixed_subtype = "related"   # la imagen va "relacionada" al HTML (se muestra dentro, no como adjunto)
-    img = MIMEImage(_header_png(), "png")
-    img.add_header("Content-ID", f"<{HEADER_CID}>")
-    img.add_header("Content-Disposition", "inline", filename="invernadero.png")
-    msg.attach(img)
     return msg
 
 

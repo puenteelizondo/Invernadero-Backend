@@ -136,7 +136,8 @@ class CorreoRecuperacionTests(APITestCase):
         self.assertIn('href="https://inv.example.com/reset-password?uid=', html)
         self.assertIn("cid:invernadero-header", html)
         msg = mail.outbox[0].message()
-        self.assertEqual(msg.get_content_type(), "multipart/related")
+        types = [p.get_content_type() for p in msg.walk()]
+        self.assertEqual(types, ["multipart/alternative", "text/plain", "multipart/related", "text/html", "image/png"])
         self.assertTrue(any(p.get("Content-ID") == "<invernadero-header>" for p in msg.walk()))
 
     @override_settings(FRONTEND_URL="", CSRF_TRUSTED_ORIGINS=["https://*.trycloudflare.com"])
