@@ -174,6 +174,8 @@ EMAIL_TIMEOUT = env.int("EMAIL_TIMEOUT", default=15)        # segundos; sin esto
 # Origin de la petición SOLO si ese origen está en CSRF_TRUSTED_ORIGINS
 # (así nadie puede mandar correos con enlaces a un sitio ajeno).
 FRONTEND_URL = env("FRONTEND_URL", default="").rstrip("/")
+# Avisos de invitaciones/miembros en un hilo aparte (no hacen esperar la petición).
+EMAIL_ASYNC = env.bool("EMAIL_ASYNC", default=True)
 
 
 

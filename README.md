@@ -871,28 +871,34 @@ Avisan cuando un sensor sale de los límites definidos para él. Se evalúan **d
 
 **Límites conocidos.** No hay histéresis (si el valor oscila justo en el límite se abren y cierran alertas seguidas; usa `duration_seconds` para amortiguarlo). Rendimiento medido (PostgreSQL y Redis reales, un proceso, 20 dispositivos × 10 sensores): ~390 lecturas/s sin reglas, ~320 con una regla por sensor que no se incumple y ~290 en el peor caso (todas las lecturas cambiando el estado de la alerta constantemente).
 
-### Membresías (`apps/memberships`)
+### Membresías e invitaciones (`apps/memberships`)
 
-#### `GET/POST /api/v1/memberships/`, `GET/PUT/PATCH/DELETE /api/v1/memberships/{id}/`
-Quién tiene acceso a qué invernadero. Solo el Owner del invernadero en cuestión (o staff) puede **ver, crear o borrar** sus membresías — el queryset ya viene filtrado a "invernaderos donde soy Owner", así que un no-Owner recibe `404` (no `403`) al intentar acceder a una membership que no puede ni ver.
+#### Invitaciones: `GET/POST /api/v1/invitations/`, `POST /api/v1/invitations/{id}/accept|decline|cancel/`
+Para dar acceso a alguien, el **Owner** del invernadero (o staff) le manda una **invitación**. La persona **no tiene acceso hasta que la acepta**; si la rechaza, no pasa nada y se le puede volver a invitar.
 
-**Request (POST) — dos formas de decir a quién invitas**:
-
-Por `id` numérico del usuario (como antes):
+**Invitar** (Owner o staff):
 ```json
-{ "user": 4, "greenhouse": 1, "role": "operator" }
+POST /api/v1/invitations/
+{ "invite": "ana@ejemplo.com", "greenhouse": 1, "role": "operator" }
 ```
-Por `username` o `email` (`invite`, sin necesitar el id):
-```json
-{ "invite": "cliente1", "greenhouse": 1, "role": "operator" }
-```
-Si mandas ambos, `user` gana. Si no mandas ninguno, `400` con `{"user": ["Manda 'user' (id numérico) o 'invite' (username o email)..."]}`. Si `invite` no coincide con ningún usuario, `400` con `{"invite": ["No existe ningún usuario con username o email '...'."]}`.
+`invite` es el username o el email de una cuenta **activa**. Errores `400`: no existe, ya es miembro, ya tiene una invitación pendiente a ese invernadero, o te invitas a ti mismo. `403` si no eres Owner de ese invernadero. Si la persona tiene email, le llega un correo con el enlace a la página.
 
-**Response 201** (igual en ambos casos):
+**Respuesta 201**:
 ```json
-{ "id": 7, "user": 4, "username": "cliente1", "greenhouse": 1, "role": "operator", "created_at": "2026-09-21T12:00:00Z" }
+{ "id": 3, "greenhouse": 1, "greenhouse_name": "UdeC", "user": 4, "username": "ana", "role": "operator",
+  "status": "pending", "invited_by_username": "jesus", "created_at": "2026-10-07T19:00:00Z", "responded_at": null }
 ```
-**Errores**: `400` si no se puede resolver a qué usuario invitar (ver arriba); `403` si no eres Owner (al intentar crear/borrar sabiendo el id de un invernadero ajeno donde tampoco eres miembro); `404` si el recurso no está en tu queryset visible.
+
+**Listar**: `GET /api/v1/invitations/` = las que **me** mandaron (pendientes). `?box=sent&greenhouse=<id>` = las que mandaron los Owners de ese invernadero. `?status=accepted|declined|cancelled|all` cambia el filtro (por defecto `pending`).
+
+**Responder** (solo la persona invitada): `POST /api/v1/invitations/{id}/accept/` crea la membresía con el rol de la invitación; `.../decline/` la rechaza. Al Owner que invitó le llega un correo con la respuesta. **Cancelar** (Owner o staff, mientras siga pendiente): `.../cancel/`. Responder o cancelar una que ya no está pendiente da `400`. Las invitaciones respondidas se conservan como historial.
+
+#### Membresías: `GET /api/v1/memberships/?greenhouse=<id>`, `PATCH/DELETE /api/v1/memberships/{id}/`
+Quién tiene acceso a qué invernadero. Solo el Owner del invernadero (o staff) puede ver, cambiar el rol o quitar membresías; un no-Owner recibe `404`.
+
+- `PATCH {"role": "viewer"}` cambia el rol y le avisa por correo a la persona. `user` y `greenhouse` **no se pueden cambiar** (`400`): para mover a alguien, quita la membresía e invítalo de nuevo.
+- `DELETE` quita el acceso y le avisa por correo.
+- `POST /api/v1/memberships/` (agregar **sin** invitación) queda **solo para staff**: acepta `{"user": <id>}` o `{"invite": "<username o email>"}` más `greenhouse` y `role`. Para un Owner responde `403` indicando que use las invitaciones.
 
 ---
 
@@ -944,9 +950,9 @@ Códigos que realmente puede producir la API (no una lista genérica):
 3. El dispositivo físico manda `POST /api/v1/readings/ingest/` con el header `X-Device-Key` y el `sensor_id` de cada sensor que reporta.
 
 ### Invitar a alguien más a un invernadero
-1. El Owner necesita el `id` numérico del usuario a invitar (no hay búsqueda por username en el endpoint; ver [Observaciones](#observaciones--pendientes)).
-2. `POST /api/v1/memberships/` con `{"user": <id>, "greenhouse": <id>, "role": "operator" | "viewer" | "owner"}`.
-3. Ese usuario, desde su próxima petición, ya ve el invernadero y puede actuar según su rol.
+1. El Owner entra a **Miembros** → **Invitar**, escribe el username o email de una cuenta existente y elige el rol (o `POST /api/v1/invitations/`).
+2. A la persona le llega un correo (si tiene email) y, al entrar a la página, ve la invitación arriba con **Aceptar** / **Rechazar**.
+3. Al aceptar, ya ve el invernadero y puede actuar según su rol. Mientras tanto, el Owner la ve en "Invitaciones pendientes" y puede cancelarla.
 
 ### Controlar un actuador y ver el cambio en tiempo real
 1. Un cliente conectado por WebSocket a `/ws/greenhouses/<id>/`.

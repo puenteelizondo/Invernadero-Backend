@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Membership
+from .models import Invitation, Membership
 
 
 @admin.register(Membership)
@@ -11,4 +11,11 @@ class MembershipAdmin(admin.ModelAdmin):
     """
     list_display = ["user", "greenhouse", "role", "created_at"]
     list_filter = ["role", "greenhouse"]
+    search_fields = ["user__username", "greenhouse__name"]
+
+
+@admin.register(Invitation)
+class InvitationAdmin(admin.ModelAdmin):
+    list_display = ["user", "greenhouse", "role", "status", "invited_by", "created_at", "responded_at"]
+    list_filter = ["status", "role", "greenhouse"]
     search_fields = ["user__username", "greenhouse__name"]
