@@ -165,6 +165,15 @@ EMAIL_PORT = env.int("EMAIL_PORT", default=25)
 EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
 EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
+EMAIL_USE_SSL = env.bool("EMAIL_USE_SSL", default=False)   # puerto 465; con 587 usa EMAIL_USE_TLS
+EMAIL_TIMEOUT = env.int("EMAIL_TIMEOUT", default=15)        # segundos; sin esto un SMTP caído cuelga la petición
+
+# Dirección pública del FRONTEND (p. ej. https://invernadero.tu-dominio.com),
+# sin "/" al final. Se usa para armar el enlace del correo de recuperación
+# de contraseña y el de las alertas. Si está vacía, el enlace se arma con el
+# Origin de la petición SOLO si ese origen está en CSRF_TRUSTED_ORIGINS
+# (así nadie puede mandar correos con enlaces a un sitio ajeno).
+FRONTEND_URL = env("FRONTEND_URL", default="").rstrip("/")
 
 
 

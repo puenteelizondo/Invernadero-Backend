@@ -1,3 +1,5 @@
+import logging
+
 from django.contrib.auth import get_user_model, login, logout
 from django.core.mail import send_mail
 from django.middleware.csrf import get_token
@@ -9,6 +11,8 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from apps.common.frontend import frontend_base
 
 from django.contrib.auth.password_validation import validate_password
 
@@ -24,6 +28,7 @@ from .serializers import (
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 class PasswordResetRequestView(APIView):
@@ -52,27 +57,42 @@ class PasswordResetRequestView(APIView):
         user = User.objects.filter(email__iexact=email, is_active=True).first()
         if user is not None:
             uid, token = build_uid_and_token(user)
-            # EMAIL_BACKEND por defecto en desarrollo es la consola
-            # (config/settings/dev.py) -- el correo se imprime en los
-            # logs de `docker compose logs web` en vez de enviarse de
-            # verdad. En producción, config/settings/prod.py exige un
-            # EMAIL_BACKEND real (SMTP) por variables de entorno.
-            send_mail(
-                subject="Recuperar tu contraseña -- Invernadero",
-                message=(
-                    "Alguien (con suerte tú) pidió restablecer la contraseña "
-                    "de esta cuenta.\n\n"
-                    "Para poner una contraseña nueva, manda un POST a "
-                    "/api/v1/auth/password-reset/confirm/ con este uid y "
-                    "token (válidos por un tiempo limitado y de un solo uso):\n\n"
+            base = frontend_base(request)
+            if base:
+                como = (
+                    "Abre este enlace para poner una contraseña nueva "
+                    "(sirve una sola vez y caduca en unos días):\n\n"
+                    f"{base}/reset-password?uid={uid}&token={token}\n"
+                )
+            else:
+                como = (
+                    "Abre la página \"Recuperar contraseña\" del Invernadero y "
+                    "usa estos datos (sirven una sola vez):\n\n"
                     f"uid: {uid}\n"
-                    f"token: {token}\n\n"
-                    "Si tú no pediste esto, puedes ignorar este correo."
-                ),
-                from_email=None,  # usa DEFAULT_FROM_EMAIL
-                recipient_list=[email],
-                fail_silently=False,
-            )
+                    f"token: {token}\n"
+                )
+            # Con el backend de consola (por defecto) el correo solo se imprime
+            # en `docker compose logs web`. Para mandarlo de verdad hay que
+            # configurar SMTP en el .env (ver README, sección "Correo").
+            try:
+                send_mail(
+                    subject="Recuperar tu contraseña -- Invernadero",
+                    message=(
+                        f"Hola {user.get_username()}:\n\n"
+                        "Alguien (con suerte tú) pidió restablecer la contraseña "
+                        "de tu cuenta del Invernadero.\n\n"
+                        f"{como}\n"
+                        "Si tú no pediste esto, ignora este correo: tu contraseña "
+                        "no cambia."
+                    ),
+                    from_email=None,  # usa DEFAULT_FROM_EMAIL
+                    recipient_list=[user.email],
+                    fail_silently=False,
+                )
+            except Exception:
+                # La respuesta debe ser la misma exista o no la cuenta, así que
+                # el error no se le muestra a quien lo pidió: queda en el log.
+                logger.exception("No se pudo mandar el correo de recuperación a %s", user.email)
 
         return Response(
             {"detail": "Si el email está registrado, se mandó un correo con instrucciones."}

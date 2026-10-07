@@ -8,6 +8,7 @@ se abre, se resuelve) o aparece un valor más extremo que el pico anterior,
 así que una lectura normal sin reglas incumplidas no cuesta ninguna
 escritura.
 """
+import logging
 import threading
 from collections import defaultdict
 
@@ -18,9 +19,12 @@ from django.db.models import Max
 from django.core.mail import send_mail
 from django.utils import timezone
 
+from apps.common.frontend import frontend_base
 from apps.memberships.models import Membership
 
 from .models import Alert, AlertRule
+
+logger = logging.getLogger(__name__)
 
 
 def load_rules(sensor_ids):
@@ -159,12 +163,15 @@ def _email_owners(alert, rule, sensor, value):
         f"{detail}\n"
         f"Inicio: {alert.opened_at:%Y-%m-%d %H:%M:%S} UTC\n"
     )
+    base = frontend_base()
+    if base:
+        body += f"\nVer alertas: {base}/greenhouses/{sensor.greenhouse_id}/alerts\n"
 
     def _send():
         try:
-            send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, recipients, fail_silently=True)
-        except Exception:  # un correo caído nunca debe afectar la ingesta
-            pass
+            send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, recipients, fail_silently=False)
+        except Exception:  # un correo caído nunca debe afectar la ingesta, pero queda en el log
+            logger.exception("No se pudo mandar el correo de alerta a %s", ", ".join(recipients))
 
     # En un hilo aparte: el SMTP puede tardar segundos y la ingesta no debe esperar.
     threading.Thread(target=_send, daemon=True).start()

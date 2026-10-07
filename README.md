@@ -261,7 +261,9 @@ Tomadas de `config/settings/base.py` y `.env.example`. Ninguno de los valores mo
 | `EMAIL_PORT` | No | Puerto SMTP. Por defecto `25`. | `587` |
 | `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` | No | Credenciales SMTP. Por defecto vacías. | *(las que te dé tu proveedor de correo)* |
 | `EMAIL_USE_TLS` | No | Si la conexión SMTP usa TLS. Por defecto `True`. | `True` |
-| `DEFAULT_FROM_EMAIL` | No | Remitente de los correos que manda la API. Por defecto `no-responder@invernadero.local`. | `no-responder@tu-dominio.com` |
+| `DEFAULT_FROM_EMAIL` | No | Remitente de los correos que manda la API. Por defecto `no-responder@invernadero.local`. Con Gmail debe ser la misma cuenta de `EMAIL_HOST_USER`. | `Invernadero <tu-cuenta@gmail.com>` |
+| `EMAIL_USE_SSL` / `EMAIL_TIMEOUT` | No | SSL directo (puerto 465) en vez de TLS, y segundos máximos de espera al SMTP. Por defecto `False` y `15`. | `False` / `15` |
+| `FRONTEND_URL` | No | Dirección pública del frontend, sin `/` final. Con ella se arma el enlace del correo de recuperación (`/reset-password?uid=…&token=…`) y el de las alertas. Si está vacía, se usa el `Origin` de la petición solo si está en `CSRF_TRUSTED_ORIGINS`; si tampoco, el correo trae el uid y el token sin enlace. | `https://invernadero.tu-dominio.com` |
 
 `.env` está excluido de Git (`.gitignore`) y de la imagen Docker (`.dockerignore`); solo `.env.example` se versiona.
 
@@ -467,6 +469,8 @@ Configurado en `REST_FRAMEWORK` dentro de `config/settings/base.py`. Existen **d
   Que la respuesta no cambie según si el email existe es intencional — si variara, cualquiera podría usar este endpoint para averiguar qué correos tienen cuenta (enumeración de usuarios). El correo en sí (con un `uid` y un `token` de un solo uso, generados con el mismo mecanismo que usan las vistas de Django desde hace años — `default_token_generator`) solo se manda si el usuario existe.
 
   Con la configuración por defecto (sin `EMAIL_BACKEND` en tu `.env`), el correo **no se envía de verdad** — se imprime en los logs (`docker compose logs web`), así puedes probar el flujo completo en desarrollo sin credenciales SMTP reales. Ver [Variables de entorno](#variables-de-entorno) para configurar un SMTP real.
+
+  **Mandar correos de verdad con Gmail.** Activa la verificación en 2 pasos de la cuenta, crea una *contraseña de aplicación* en https://myaccount.google.com/apppasswords y pon en el `.env`: `EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend`, `EMAIL_HOST=smtp.gmail.com`, `EMAIL_PORT=587`, `EMAIL_USE_TLS=True`, `EMAIL_HOST_USER` (la cuenta), `EMAIL_HOST_PASSWORD` (la contraseña de aplicación, sin espacios), `DEFAULT_FROM_EMAIL` y `FRONTEND_URL`. Recrea `web` y `alerts-monitor` y prueba con `docker compose exec web python manage.py sendtestemail tu-correo@ejemplo.com`. Si el envío falla, la API responde igual (para no revelar qué correos existen) y el error queda en `docker compose logs web`. Las alertas solo se mandan a los **dueños** del invernadero que tengan correo en su cuenta y si la regla tiene "avisar por correo".
 
   **2. `POST /api/v1/auth/password-reset/confirm/`** — con el `uid`/`token` que llegaron por correo, pones la contraseña nueva:
   ```json

@@ -108,3 +108,48 @@ class RegistroCerradoTests(APITestCase):
             format="json",
         )
         self.assertEqual(r.status_code, 400)
+
+
+from unittest import mock
+
+from django.core import mail
+from django.test import override_settings
+
+
+class CorreoRecuperacionTests(APITestCase):
+    URL = "/api/v1/auth/password-reset/"
+
+    def setUp(self):
+        get_user_model().objects.create_user("ana", email="ana@example.com", password="Clave-segura-123")
+
+    @override_settings(FRONTEND_URL="https://inv.example.com")
+    def test_correo_lleva_enlace_al_frontend(self):
+        r = self.client.post(self.URL, {"email": "ANA@example.com"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["ana@example.com"])
+        self.assertIn("https://inv.example.com/reset-password?uid=", mail.outbox[0].body)
+        self.assertIn("&token=", mail.outbox[0].body)
+
+    @override_settings(FRONTEND_URL="", CSRF_TRUSTED_ORIGINS=["https://*.trycloudflare.com"])
+    def test_sin_frontend_url_usa_origin_confiable(self):
+        self.client.post(self.URL, {"email": "ana@example.com"}, format="json",
+                         HTTP_ORIGIN="https://abc-def.trycloudflare.com")
+        self.assertIn("https://abc-def.trycloudflare.com/reset-password?uid=", mail.outbox[0].body)
+
+    @override_settings(FRONTEND_URL="", CSRF_TRUSTED_ORIGINS=["https://*.trycloudflare.com"])
+    def test_origin_ajeno_no_se_usa_en_el_enlace(self):
+        self.client.post(self.URL, {"email": "ana@example.com"}, format="json", HTTP_ORIGIN="https://malo.com")
+        self.assertNotIn("malo.com", mail.outbox[0].body)
+        self.assertIn("token:", mail.outbox[0].body)
+
+    def test_email_inexistente_misma_respuesta_y_sin_correo(self):
+        r = self.client.post(self.URL, {"email": "nadie@example.com"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_smtp_caido_no_da_500(self):
+        with mock.patch("apps.users.views.send_mail", side_effect=OSError("smtp caído")), \
+                self.assertLogs("apps.users.views", level="ERROR"):
+            r = self.client.post(self.URL, {"email": "ana@example.com"}, format="json")
+        self.assertEqual(r.status_code, 200)
