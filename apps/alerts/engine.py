@@ -149,7 +149,7 @@ def _email_owners(alert, rule, sensor, value):
         return
     unit = f" {_unit(sensor)}".rstrip()
     gh = sensor.greenhouse.name
-    critical = alert.severity == Alert.Severity.CRITICAL
+    critical = alert.severity == AlertRule.Severity.CRITICAL
     if alert.kind == Alert.Kind.STALE:
         subject = f"[{gh}] Sin señal: {sensor.name} no manda datos hace {fmt_seconds(value)}"
         title = f"{sensor.name} dejó de mandar datos"
@@ -195,7 +195,10 @@ def _email_owners(alert, rule, sensor, value):
             logger.exception("No se pudo mandar el correo de alerta a %s", ", ".join(recipients))
 
     # En un hilo aparte: el SMTP puede tardar segundos y la ingesta no debe esperar.
-    threading.Thread(target=_send, daemon=True).start()
+    if getattr(settings, "EMAIL_ASYNC", True):
+        threading.Thread(target=_send, daemon=True).start()
+    else:
+        _send()
 
 
 def purge_old_resolved(days=None):
