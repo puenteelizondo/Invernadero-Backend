@@ -1,7 +1,8 @@
 import logging
 
 from django.contrib.auth import get_user_model, login, logout
-from django.core.mail import send_mail
+from django.conf import settings
+from django.utils.html import format_html
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.utils.decorators import method_decorator
@@ -12,6 +13,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.common.emails import send_email
 from apps.common.frontend import frontend_base
 
 from django.contrib.auth.password_validation import validate_password
@@ -58,36 +60,40 @@ class PasswordResetRequestView(APIView):
         if user is not None:
             uid, token = build_uid_and_token(user)
             base = frontend_base(request)
+            days = max(1, round(settings.PASSWORD_RESET_TIMEOUT / 86400))
+            vigencia = f"Sirve una sola vez y caduca en {days} día{'s' if days != 1 else ''}."
             if base:
-                como = (
-                    "Abre este enlace para poner una contraseña nueva "
-                    "(sirve una sola vez y caduca en unos días):\n\n"
-                    f"{base}/reset-password?uid={uid}&token={token}\n"
+                content = dict(
+                    paragraphs=[
+                        format_html("Hola <strong>{}</strong>:", user.get_username()),
+                        "Alguien (con suerte tú) pidió restablecer la contraseña de tu cuenta del Invernadero. "
+                        "Presiona el botón para elegir una nueva.",
+                    ],
+                    button=("Poner contraseña nueva", f"{base}/reset-password?uid={uid}&token={token}"),
+                    note=f"{vigencia} Si tú no lo pediste, ignora este correo: tu contraseña no cambia.",
                 )
             else:
-                como = (
-                    "Abre la página \"Recuperar contraseña\" del Invernadero y "
-                    "usa estos datos (sirven una sola vez):\n\n"
-                    f"uid: {uid}\n"
-                    f"token: {token}\n"
+                content = dict(
+                    paragraphs=[
+                        format_html("Hola <strong>{}</strong>:", user.get_username()),
+                        "Alguien (con suerte tú) pidió restablecer la contraseña de tu cuenta del Invernadero. "
+                        "Abre la página «Recuperar contraseña» y usa estos datos:",
+                    ],
+                    details=[("uid", uid), ("token", token)],
+                    note=f"{vigencia} Si tú no lo pediste, ignora este correo: tu contraseña no cambia.",
                 )
             # Con el backend de consola (por defecto) el correo solo se imprime
             # en `docker compose logs web`. Para mandarlo de verdad hay que
             # configurar SMTP en el .env (ver README, sección "Correo").
             try:
-                send_mail(
-                    subject="Recuperar tu contraseña -- Invernadero",
-                    message=(
-                        f"Hola {user.get_username()}:\n\n"
-                        "Alguien (con suerte tú) pidió restablecer la contraseña "
-                        "de tu cuenta del Invernadero.\n\n"
-                        f"{como}\n"
-                        "Si tú no pediste esto, ignora este correo: tu contraseña "
-                        "no cambia."
-                    ),
-                    from_email=None,  # usa DEFAULT_FROM_EMAIL
-                    recipient_list=[user.email],
-                    fail_silently=False,
+                send_email(
+                    [user.email],
+                    "Recupera tu contraseña · Invernadero",
+                    title="Recupera tu contraseña",
+                    eyebrow="Seguridad de tu cuenta",
+                    preheader="Elige una contraseña nueva para tu cuenta del Invernadero.",
+                    footer="Recibes este correo porque se pidió recuperar la contraseña de esta cuenta.",
+                    **content,
                 )
             except Exception:
                 # La respuesta debe ser la misma exista o no la cuenta, así que

@@ -16,9 +16,9 @@ from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Max
-from django.core.mail import send_mail
 from django.utils import timezone
 
+from apps.common.emails import send_email
 from apps.common.frontend import frontend_base
 from apps.memberships.models import Membership
 
@@ -148,28 +148,49 @@ def _email_owners(alert, rule, sensor, value):
     if not recipients:
         return
     unit = f" {_unit(sensor)}".rstrip()
+    gh = sensor.greenhouse.name
+    critical = alert.severity == Alert.Severity.CRITICAL
     if alert.kind == Alert.Kind.STALE:
-        subject = f"[{sensor.greenhouse.name}] Sin señal: {sensor.name} no manda datos hace {fmt_seconds(value)}"
-        detail = f"Sin lecturas desde hace {fmt_seconds(value)} (tolerancia: {fmt_seconds(alert.threshold)})"
+        subject = f"[{gh}] Sin señal: {sensor.name} no manda datos hace {fmt_seconds(value)}"
+        title = f"{sensor.name} dejó de mandar datos"
+        lead = (f"El sensor «{sensor.name}» de {gh} lleva {fmt_seconds(value)} sin mandar lecturas. "
+                "Revisa que el ESP32 tenga corriente y WiFi.")
+        rows = [("Tolerancia", fmt_seconds(alert.threshold))]
+        highlight = ("Sin lecturas desde hace", fmt_seconds(value))
+        tone = "danger" if critical else "info"
     else:
         what = "por encima del máximo" if alert.kind == Alert.Kind.HIGH else "por debajo del mínimo"
-        subject = f"[{sensor.greenhouse.name}] Alerta: {sensor.name} {what} ({value:g}{unit})"
-        detail = f"Valor: {value:g}{unit} ({what}; límite {alert.threshold:g}{unit})"
-    body = (
-        f"Invernadero: {sensor.greenhouse.name}\n"
-        f"Sensor: {sensor.name}\n"
-        f"Regla: {rule}\n"
-        f"Severidad: {alert.get_severity_display()}\n"
-        f"{detail}\n"
-        f"Inicio: {alert.opened_at:%Y-%m-%d %H:%M:%S} UTC\n"
-    )
+        subject = f"[{gh}] Alerta: {sensor.name} {what} ({value:g}{unit})"
+        title = f"{sensor.name} está {what}"
+        lead = f"La lectura de «{sensor.name}» en {gh} salió del rango permitido."
+        limite = ("Límite máximo" if alert.kind == Alert.Kind.HIGH else "Límite mínimo")
+        rows = []
+        highlight = ("Valor medido", f"{value:g}{unit}", f"{limite}: {alert.threshold:g}{unit}")
+        tone = "danger" if critical else "warning"
+    rows += [
+        ("Invernadero", gh),
+        ("Sensor", sensor.name),
+        ("Regla", str(rule)),
+        ("Severidad", alert.get_severity_display()),
+        ("Inicio", f"{alert.opened_at:%d/%m/%Y %H:%M:%S} UTC"),
+    ]
     base = frontend_base()
-    if base:
-        body += f"\nVer alertas: {base}/greenhouses/{sensor.greenhouse_id}/alerts\n"
+    content = dict(
+        title=title,
+        eyebrow=f"Alerta {alert.get_severity_display().lower()}",
+        tone=tone,
+        preheader=lead,
+        paragraphs=[lead],
+        highlight=highlight,
+        details=rows,
+        button=("Ver alertas", f"{base}/greenhouses/{sensor.greenhouse_id}/alerts") if base else None,
+        note="Solo se manda un correo cuando empieza la alerta, no por cada lectura.",
+        footer="Recibes este correo porque eres propietario de este invernadero y la regla tiene «avisar por correo».",
+    )
 
     def _send():
         try:
-            send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, recipients, fail_silently=False)
+            send_email(recipients, subject, **content)
         except Exception:  # un correo caído nunca debe afectar la ingesta, pero queda en el log
             logger.exception("No se pudo mandar el correo de alerta a %s", ", ".join(recipients))
 

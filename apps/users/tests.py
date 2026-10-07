@@ -130,6 +130,14 @@ class CorreoRecuperacionTests(APITestCase):
         self.assertEqual(mail.outbox[0].to, ["ana@example.com"])
         self.assertIn("https://inv.example.com/reset-password?uid=", mail.outbox[0].body)
         self.assertIn("&token=", mail.outbox[0].body)
+        # versión con diseño: HTML con el botón y la ilustración incrustada
+        html, mime = mail.outbox[0].alternatives[0]
+        self.assertEqual(mime, "text/html")
+        self.assertIn('href="https://inv.example.com/reset-password?uid=', html)
+        self.assertIn("cid:invernadero-header", html)
+        msg = mail.outbox[0].message()
+        self.assertEqual(msg.get_content_type(), "multipart/related")
+        self.assertTrue(any(p.get("Content-ID") == "<invernadero-header>" for p in msg.walk()))
 
     @override_settings(FRONTEND_URL="", CSRF_TRUSTED_ORIGINS=["https://*.trycloudflare.com"])
     def test_sin_frontend_url_usa_origin_confiable(self):
@@ -141,6 +149,7 @@ class CorreoRecuperacionTests(APITestCase):
     def test_origin_ajeno_no_se_usa_en_el_enlace(self):
         self.client.post(self.URL, {"email": "ana@example.com"}, format="json", HTTP_ORIGIN="https://malo.com")
         self.assertNotIn("malo.com", mail.outbox[0].body)
+        self.assertNotIn("malo.com", mail.outbox[0].alternatives[0][0])
         self.assertIn("token:", mail.outbox[0].body)
 
     def test_email_inexistente_misma_respuesta_y_sin_correo(self):
@@ -149,7 +158,18 @@ class CorreoRecuperacionTests(APITestCase):
         self.assertEqual(len(mail.outbox), 0)
 
     def test_smtp_caido_no_da_500(self):
-        with mock.patch("apps.users.views.send_mail", side_effect=OSError("smtp caído")), \
+        with mock.patch("apps.users.views.send_email", side_effect=OSError("smtp caído")), \
                 self.assertLogs("apps.users.views", level="ERROR"):
             r = self.client.post(self.URL, {"email": "ana@example.com"}, format="json")
         self.assertEqual(r.status_code, 200)
+
+
+class PlantillaCorreoTests(APITestCase):
+    def test_escapa_html_de_los_datos(self):
+        from apps.common.emails import render_html
+
+        html = render_html(title="<script>x</script>", paragraphs=["a & <b>b</b>"], details=[("k", "<i>v</i>")])
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)
+        self.assertIn("&lt;b&gt;", html)
+        self.assertIn("&lt;i&gt;", html)

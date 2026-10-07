@@ -132,7 +132,10 @@ class MiembrosTests(APITestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(mail.outbox[-1].to, ["ana@example.com"])
         self.assertIn("Cambió tu rol", mail.outbox[-1].subject)
-        self.assertIn("operador", mail.outbox[-1].body)
+        self.assertIn("Operador", mail.outbox[-1].body)
+        html = mail.outbox[-1].alternatives[0][0]
+        self.assertIn("cid:invernadero-header", html)
+        self.assertIn("Solo lectura", html)
 
     def test_quitar_acceso_avisa_por_correo(self):
         self.assertEqual(self.client.delete(f"/api/v1/memberships/{self.m_ana.pk}/").status_code, 204)

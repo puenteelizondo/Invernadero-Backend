@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#CFE7D3"/><stop offset="0.55" stop-color="#EAF4E6"/><stop offset="1" stop-color="#F7F3E3"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFF6D6"/><stop offset="0.55" stop-color="#FCE7A8"/><stop offset="1" stop-color="#FCE7A8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.75"/><stop offset="1" stop-color="#D7EBDA" stop-opacity="0.55"/>
+    </linearGradient>
+    <linearGradient id="hill1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#A9CFAF"/><stop offset="1" stop-color="#8DBE96"/></linearGradient>
+    <linearGradient id="hill2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6FA97B"/><stop offset="1" stop-color="#4E8E5D"/></linearGradient>
+    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2F7449"/><stop offset="1" stop-color="#1F5E3B"/></linearGradient>
+    <clipPath id="tunnel"><path d="M330 330 V215 C330 120 870 120 870 215 V330 Z"/></clipPath>
+  </defs>
+  <rect width="1200" height="400" fill="url(#sky)"/>
+  <circle cx="960" cy="110" r="150" fill="url(#sun)"/>
+  <circle cx="960" cy="110" r="46" fill="#FFF3C4"/>
+  <!-- nubes -->
+  <g fill="#FFFFFF" opacity="0.85">
+    <ellipse cx="190" cy="92" rx="70" ry="18"/><ellipse cx="235" cy="80" rx="42" ry="20"/><ellipse cx="150" cy="84" rx="30" ry="14"/>
+    <ellipse cx="660" cy="62" rx="52" ry="13"/><ellipse cx="690" cy="54" rx="30" ry="14"/>
+  </g>
+  <!-- aves -->
+  <g fill="none" stroke="#4E6B55" stroke-width="2.4" stroke-linecap="round" opacity="0.6">
+    <path d="M420 92 q8 -8 16 0 q8 -8 16 0"/><path d="M462 70 q6 -6 12 0 q6 -6 12 0"/>
+  </g>
+  <!-- colinas -->
+  <path d="M0 250 C160 190 300 210 420 235 C560 262 700 190 860 200 C1000 210 1100 240 1200 225 V400 H0 Z" fill="url(#hill1)"/>
+  <path d="M0 300 C140 262 260 270 380 290 C520 312 700 262 860 272 C1010 282 1110 300 1200 290 V400 H0 Z" fill="url(#hill2)"/>
+  <!-- árboles lejanos -->
+  <g fill="#3E8352">
+    <ellipse cx="120" cy="268" rx="22" ry="30"/><rect x="117" y="290" width="6" height="16" fill="#355E40"/>
+    <ellipse cx="160" cy="276" rx="16" ry="22"/><rect x="157" y="292" width="5" height="12" fill="#355E40"/>
+    <ellipse cx="1060" cy="262" rx="20" ry="28"/><rect x="1057" y="284" width="6" height="16" fill="#355E40"/>
+    <ellipse cx="1100" cy="270" rx="14" ry="20"/>
+  </g>
+  <!-- invernadero tipo túnel -->
+  <ellipse cx="600" cy="334" rx="300" ry="14" fill="#174A2E" opacity="0.25"/>
+  <path d="M330 330 V215 C330 120 870 120 870 215 V330 Z" fill="url(#glass)" stroke="#1F5E3B" stroke-width="5" stroke-linejoin="round"/>
+  <g clip-path="url(#tunnel)">
+    <!-- cultivos dentro -->
+    <rect x="330" y="292" width="540" height="40" fill="#5C4A36" opacity="0.35"/>
+    <g fill="#3E8E57">
+      <g id="row">
+        <path d="M360 300 c0 -22 10 -32 22 -34 c0 18 -8 30 -22 34z"/><path d="M360 300 c0 -18 -10 -28 -20 -30 c0 16 8 26 20 30z"/>
+      </g>
+    </g>
+    <g fill="#4FA36A">
+      <path d="M400 306 c0-26 12-38 26-40 c0 22-10 34-26 40z M400 306 c0-20-11-31-23-33 c0 18 9 29 23 33z"/>
+      <path d="M470 306 c0-30 14-44 30-46 c0 26-12 40-30 46z M470 306 c0-24-13-36-27-38 c0 20 11 33 27 38z"/>
+      <path d="M545 306 c0-26 12-38 26-40 c0 22-10 34-26 40z M545 306 c0-20-11-31-23-33 c0 18 9 29 23 33z"/>
+      <path d="M620 306 c0-30 14-44 30-46 c0 26-12 40-30 46z M620 306 c0-24-13-36-27-38 c0 20 11 33 27 38z"/>
+      <path d="M695 306 c0-26 12-38 26-40 c0 22-10 34-26 40z M695 306 c0-20-11-31-23-33 c0 18 9 29 23 33z"/>
+      <path d="M770 306 c0-30 14-44 30-46 c0 26-12 40-30 46z M770 306 c0-24-13-36-27-38 c0 20 11 33 27 38z"/>
+      <path d="M840 306 c0-26 12-38 26-40 c0 22-10 34-26 40z"/>
+    </g>
+    <!-- tomates -->
+    <g fill="#E0664F"><circle cx="488" cy="290" r="5"/><circle cx="638" cy="288" r="5"/><circle cx="788" cy="290" r="5"/><circle cx="560" cy="294" r="4"/></g>
+    <!-- reflejo del vidrio -->
+    <path d="M380 150 C430 128 500 118 560 116 L520 330 L430 330 Z" fill="#FFFFFF" opacity="0.28"/>
+  </g>
+  <!-- costillas -->
+  <g fill="none" stroke="#1F5E3B" stroke-width="3.2" opacity="0.85">
+    <path d="M420 330 V200 C420 150 780 150 780 200 V330" opacity="0.5"/>
+    <path d="M330 222 H870" opacity="0.35"/>
+  </g>
+  <g stroke="#1F5E3B" stroke-width="3" opacity="0.55">
+    <line x1="420" y1="168" x2="420" y2="330"/><line x1="510" y1="146" x2="510" y2="330"/><line x1="600" y1="141" x2="600" y2="330"/>
+    <line x1="690" y1="146" x2="690" y2="330"/><line x1="780" y1="168" x2="780" y2="330"/>
+  </g>
+  <!-- puerta -->
+  <rect x="572" y="262" width="56" height="70" rx="4" fill="#FFFFFF" fill-opacity="0.35" stroke="#1F5E3B" stroke-width="4"/>
+  <line x1="600" y1="262" x2="600" y2="332" stroke="#1F5E3B" stroke-width="3"/>
+  <!-- sensor con señal -->
+  <g transform="translate(905 262)">
+    <rect x="-4" y="0" width="8" height="70" fill="#3B463B"/>
+    <rect x="-16" y="-20" width="32" height="24" rx="5" fill="#FFFFFF" stroke="#1F5E3B" stroke-width="3"/>
+    <circle cx="0" cy="-8" r="4" fill="#3FA463"/>
+    <g fill="none" stroke="#1F5E3B" stroke-width="3" stroke-linecap="round" opacity="0.8">
+      <path d="M-14 -34 a20 20 0 0 1 28 0"/><path d="M-24 -46 a34 34 0 0 1 48 0"/>
+    </g>
+  </g>
+  <!-- primer plano -->
+  <path d="M0 340 C200 322 400 332 600 336 C800 340 1000 324 1200 334 V400 H0 Z" fill="url(#ground)"/>
+  <g fill="#80BB8C">
+    <path d="M90 352 c0-20 9-30 20-32 c0 18-8 28-20 32z M90 352 c0-16-8-24-17-26 c0 14 7 22 17 26z"/>
+    <path d="M250 358 c0-16 7-24 16-26 c0 14-6 22-16 26z M250 358 c0-12-6-18-13-20 c0 10 5 17 13 20z"/>
+    <path d="M1010 354 c0-20 9-30 20-32 c0 18-8 28-20 32z M1010 354 c0-16-8-24-17-26 c0 14 7 22 17 26z"/>
+    <path d="M1130 360 c0-14 6-21 14-23 c0 12-5 19-14 23z"/>
+  </g>
+</svg>
