@@ -116,7 +116,7 @@ class Actuator(models.Model):
         )
         # Aviso inmediato al ESP32 dueño del actuador (si está conectado por su
         # WebSocket): así obedece al instante, sin tener que preguntar.
-        if self.device_id:
+        if self.device_id and self.is_active:
             from apps.control.services import push_to_device
 
             push_to_device(self.device_id, "actuator_state", actuator_id=self.id, state=self.state)

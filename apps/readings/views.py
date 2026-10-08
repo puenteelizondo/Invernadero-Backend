@@ -14,7 +14,7 @@ from .exports import build_readings_xlsx
 from .filters import ReadingFilter
 from .models import Reading
 from .pagination import ReadingCursorPagination
-from .ingest import ingest_readings
+from .ingest import ingest_readings, within_device_limit
 from .serializers import (
     ReadingExportQuerySerializer,
     ReadingSerializer,
@@ -33,6 +33,9 @@ class ReadingViewSet(GreenhouseScopedMixin, viewsets.ReadOnlyModelViewSet):
     queryset = Reading.objects.select_related(
         "sensor", "sensor__sensor_type", "sensor__greenhouse"
     ).all()
+
+
+MAX_READINGS_PER_REQUEST = 100
 
 
 class ReadingIngestView(APIView):
@@ -55,7 +58,17 @@ class ReadingIngestView(APIView):
                 {"detail": "Se esperaba una lectura o una lista bajo 'readings'."},
                 status=400,
             )
+        if len(raw_items) > MAX_READINGS_PER_REQUEST:
+            return Response(
+                {"detail": f"Máximo {MAX_READINGS_PER_REQUEST} lecturas por petición."},
+                status=400,
+            )
 
+        if not within_device_limit(device.pk, len(raw_items)):
+            return Response(
+                {"detail": "Demasiadas lecturas: máximo 10 por segundo por dispositivo (HTTP y WebSocket juntos)."},
+                status=429,
+            )
         return Response(ingest_readings(device, raw_items), status=200)
 
 

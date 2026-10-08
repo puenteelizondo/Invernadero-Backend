@@ -7,6 +7,10 @@ Núcleo de la ingesta de lecturas, compartido por:
 Así las dos vías validan, disparan alertas, deciden qué se guarda en el
 historial ("guardar cada N") y avisan a la página EXACTAMENTE igual.
 """
+import time
+
+from django.core.cache import cache
+
 from apps.alerts import engine as alert_engine
 from apps.common.realtime import publish_events
 from apps.sensors.models import Sensor
@@ -14,6 +18,24 @@ from apps.sensors.models import Sensor
 from .models import Reading
 from .persistence import mark_latest, mark_persisted, should_persist
 from .serializers import ReadingIngestItemSerializer
+
+
+# Límite de lecturas POR DISPOSITIVO, el mismo para HTTP y WebSocket (un solo
+# contador en la caché): cambiar de vía o abrir más conexiones no lo multiplica.
+# 30 lecturas cada 3 s = 10 por segundo en promedio, de sobra para un ESP32.
+READINGS_WINDOW = 3
+READINGS_PER_WINDOW = 30
+
+
+def within_device_limit(device_id, n) -> bool:
+    key = f"ctrl:rl:{device_id}:{int(time.time() // READINGS_WINDOW)}"
+    cache.add(key, 0, READINGS_WINDOW * 2)
+    try:
+        used = cache.incr(key, n)
+    except ValueError:            # la clave expiró justo entre add e incr
+        cache.set(key, n, READINGS_WINDOW * 2)
+        used = n
+    return used <= READINGS_PER_WINDOW
 
 
 def ingest_readings(device, raw_items):
@@ -25,6 +47,7 @@ def ingest_readings(device, raw_items):
     wanted = {
         item["sensor_id"] for item in raw_items
         if isinstance(item, dict) and isinstance(item.get("sensor_id"), int)
+        and 0 < item["sensor_id"] < 2**63      # un id gigante no debe llegar a la base de datos
     }
     sensors = {
         sn.id: sn

@@ -1,9 +1,11 @@
 from rest_framework import serializers
 
+from apps.common.serializers import FixedGreenhouseMixin
+
 from .models import Greenhouse, Zone
 
 
-class ZoneSerializer(serializers.ModelSerializer):
+class ZoneSerializer(FixedGreenhouseMixin, serializers.ModelSerializer):
     class Meta:
         model = Zone
         fields = ["id", "greenhouse", "name", "description", "created_at"]
@@ -43,4 +45,4 @@ class GreenhouseSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 f"'{value}' no es una zona horaria IANA válida."
             )
-        return value
+        return value

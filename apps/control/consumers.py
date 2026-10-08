@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import json
 import math
 import time
@@ -13,26 +14,34 @@ from apps.common.realtime import publish_event
 from . import services
 from .tokens import consume_device_ws_token
 
+logger = logging.getLogger(__name__)
+
 PING_EVERY = 25          # s entre ping y ping
 IDLE_LIMIT = 75          # s sin recibir NADA => se cierra la conexión
 TELEMETRY_MIN_GAP = 0.5  # s: el servidor retransmite como máximo 2 mensajes/s por lazo
 MAX_MESSAGE_BYTES = 4096
-# Lecturas por WebSocket: cubeta de fichas por conexión. Se aceptan hasta
-# READINGS_BURST lecturas seguidas y luego READINGS_PER_SEC por segundo
-# (de sobra para un ESP32 con varios sensores leyendo cada segundo).
+# Lecturas: el límite es POR DISPOSITIVO y compartido con la ingesta HTTP
+# (apps/readings/ingest.py::within_device_limit): 30 cada 3 s.
 READINGS_PER_SEC = 10
-READINGS_BURST = 30
 MAX_READINGS_PER_MESSAGE = 20
 RESULT_NOTICE_GAP = 5.0  # s entre avisos de "lecturas rechazadas" al dispositivo
 
 
+MAX_ID = 2**63 - 1
+
+
 def _num(value):
-    """float finito o None (descarta NaN/inf/strings)."""
+    """float finito o None (descarta NaN/inf/strings y números gigantes)."""
     try:
         f = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return f if math.isfinite(f) else None
+
+
+def _id(value):
+    """Entero positivo que cabe en la base de datos, o None."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= MAX_ID else None
 
 
 class DeviceConsumer(AsyncWebsocketConsumer):
@@ -61,7 +70,7 @@ class DeviceConsumer(AsyncWebsocketConsumer):
             await self.close(code=4401)
             return
 
-        self.device_id, self.greenhouse_id = device
+        self.device_id, self.greenhouse_id, self._key_hash = device
         self.group = services.device_group(self.device_id)
         self.loops = {}            # loop_id -> {"actuator_id": ...}
         self._last_fwd = {}        # loop_id -> monotonic del último reenvío
@@ -70,12 +79,16 @@ class DeviceConsumer(AsyncWebsocketConsumer):
         self._last_seen_write = 0.0
         self._joined = False
         self._ping_task = None
-        self._tokens = float(READINGS_BURST)
-        self._tokens_at = time.monotonic()
         self._last_notice = 0.0
 
         await self.channel_layer.group_add(self.group, self.channel_name)
         self._joined = True
+        # Segunda revisión YA dentro del grupo: si regeneraron la clave o
+        # desactivaron el dispositivo entre la primera y aquí, el aviso de
+        # cierre pudo perderse; así no se cuela.
+        if await self._authenticate_again(device) is None:
+            await self.close(code=4401)
+            return
         await self.accept()
         services.mark_online(self.device_id, self.channel_name)
         await self._announce(True)
@@ -105,6 +118,12 @@ class DeviceConsumer(AsyncWebsocketConsumer):
             self.loops.pop(data["loop_id"], None)
         await self.send_json({"event": event, **data})
 
+    async def device_close(self, message):
+        """El servidor pidió cerrar (clave regenerada, o dispositivo desactivado o borrado)."""
+        if message.get("except_channel") == self.channel_name:
+            return
+        await self.close(code=4403)
+
     async def send_json(self, obj):
         await self.send(text_data=json.dumps(obj))
 
@@ -124,12 +143,15 @@ class DeviceConsumer(AsyncWebsocketConsumer):
         await self._touch_last_seen()
 
         event = msg.get("event")
-        if event == "ack":
-            await self._on_ack(msg)
-        elif event == "telemetry":
-            await self._on_telemetry(msg)
-        elif event == "readings":
-            await self._on_readings(msg)
+        try:
+            if event == "ack":
+                await self._on_ack(msg)
+            elif event == "telemetry":
+                await self._on_telemetry(msg)
+            elif event == "readings":
+                await self._on_readings(msg)
+        except Exception:  # un mensaje raro nunca debe tumbar la conexión ni dejar basura
+            logger.exception("Mensaje del dispositivo %s ignorado", self.device_id)
         # "pong" y "hello" solo sirven para mantener viva la conexión.
 
     async def _on_readings(self, msg):
@@ -138,14 +160,16 @@ class DeviceConsumer(AsyncWebsocketConsumer):
             return
         items = items[:MAX_READINGS_PER_MESSAGE]
 
-        now = time.monotonic()
-        self._tokens = min(READINGS_BURST, self._tokens + (now - self._tokens_at) * READINGS_PER_SEC)
-        self._tokens_at = now
-        if self._tokens < len(items):
+        # Solo objetos con un sensor_id razonable; lo demás ni siquiera llega a la base.
+        items = [
+            i if isinstance(i, dict) and _id(i.get("sensor_id"))
+            else {"sensor_id": None, "value": i.get("value") if isinstance(i, dict) else None}
+            for i in items
+        ]
+        if not await self._within_limit(len(items)):
             await self._notice({"error": "rate_limited",
-                                "detail": f"Demasiadas lecturas: máximo {READINGS_PER_SEC} por segundo."})
+                                "detail": f"Demasiadas lecturas: máximo {READINGS_PER_SEC} por segundo por dispositivo."})
             return
-        self._tokens -= len(items)
 
         result = await self._ingest(items)
         rejected = [r for r in result["results"] if r["status"] != "accepted"]
@@ -156,6 +180,11 @@ class DeviceConsumer(AsyncWebsocketConsumer):
                 for r in rejected[:5]
             ]})
 
+    async def _within_limit(self, n):
+        from apps.readings.ingest import within_device_limit
+
+        return await database_sync_to_async(within_device_limit)(self.device_id, n)
+
     async def _notice(self, data):
         """Avisa al dispositivo (para el monitor serie), sin inundarlo: 1 aviso cada pocos segundos."""
         now = time.monotonic()
@@ -165,8 +194,8 @@ class DeviceConsumer(AsyncWebsocketConsumer):
         await self.send_json({"event": "readings_result", **data})
 
     async def _on_ack(self, msg):
-        loop_id, version = msg.get("loop_id"), msg.get("version")
-        if not isinstance(loop_id, int) or not isinstance(version, int) or loop_id not in self.loops:
+        loop_id, version = _id(msg.get("loop_id")), _id(msg.get("version"))
+        if loop_id is None or version is None or loop_id not in self.loops:
             return
         payload = await self._save_ack(loop_id, version)
         if payload is not None:
@@ -175,13 +204,18 @@ class DeviceConsumer(AsyncWebsocketConsumer):
             )
 
     async def _on_telemetry(self, msg):
-        loop_id = msg.get("loop_id")
-        if not isinstance(loop_id, int) or loop_id not in self.loops:
+        from django.core.cache import cache
+
+        loop_id = _id(msg.get("loop_id"))
+        if loop_id is None or loop_id not in self.loops:
             return
         now = time.monotonic()
         if now - self._last_fwd.get(loop_id, 0.0) < TELEMETRY_MIN_GAP:
             return
         self._last_fwd[loop_id] = now
+        # El mismo tope, pero compartido entre todas las conexiones del dispositivo.
+        if not await cache.aadd(f"ctrl:tmgap:{loop_id}:{int(time.time() / TELEMETRY_MIN_GAP)}", 1, 5):
+            return
 
         data = {
             "loop_id": loop_id,
@@ -195,7 +229,7 @@ class DeviceConsumer(AsyncWebsocketConsumer):
             "i": _num(msg.get("i")),
             "d": _num(msg.get("d")),
             "mode": str(msg.get("mode", ""))[:10],
-            "version": msg.get("version") if isinstance(msg.get("version"), int) else None,
+            "version": _id(msg.get("version")),
             "ts": timezone.now().isoformat(),
         }
         services.set_last_telemetry(loop_id, data)
@@ -229,11 +263,20 @@ class DeviceConsumer(AsyncWebsocketConsumer):
 
         if not token:
             return None
-        device_id = consume_device_ws_token(token)
-        if device_id is None:
+        data = consume_device_ws_token(token)
+        if data is None:
             return None
-        row = Device.objects.filter(pk=device_id, is_active=True).values_list("pk", "greenhouse_id").first()
+        row = (Device.objects.filter(pk=data["id"], is_active=True)
+               .values_list("pk", "greenhouse_id", "api_key_hash").first())
+        if row is None or (data["key"] is not None and data["key"] != row[2]):
+            return None          # la clave cambió después de pedir el token
         return row
+
+    @database_sync_to_async
+    def _authenticate_again(self, device):
+        from apps.sensors.models import Device
+
+        return Device.objects.filter(pk=device[0], is_active=True, api_key_hash=device[2]).values_list("pk").first()
 
     @database_sync_to_async
     def _load_loops(self):

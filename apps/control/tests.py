@@ -546,13 +546,100 @@ class DeviceRealtimeTests(TransactionTestCase):
         await comm.receive_json_from()
         sid = self.w["a"]["sensor"].pk
         lote = [{"sensor_id": sid, "value": 20 + i / 10} for i in range(20)]
-        await comm.send_json_to({"event": "readings", "readings": lote})       # 20 de 30 fichas
-        await comm.send_json_to({"event": "readings", "readings": lote})       # ya no alcanza
+        for _ in range(3):                                   # 60 lecturas seguidas (límite: 30 cada 3 s)
+            await comm.send_json_to({"event": "readings", "readings": lote})
         msg = await comm.receive_json_from(timeout=2)
         self.assertEqual((msg["event"], msg["error"]), ("readings_result", "rate_limited"))
         got = await self._events(layer, "p_lim", "sensor_reading")
-        self.assertEqual(len(got), 20)
+        self.assertIn(len(got), (20, 40))
         await comm.disconnect()
+
+    # ---- cierre de conexiones -----------------------------------------------
+    async def _closed(self, comm):
+        out = await comm.receive_output(timeout=2)
+        return out.get("type") == "websocket.close"
+
+    async def test_regenerar_la_clave_corta_la_conexion_abierta(self):
+        comm = await self._connect("a")
+        await comm.receive_json_from()
+
+        def rotar():
+            from rest_framework.test import APIClient
+
+            c = APIClient()
+            c.force_authenticate(self.u["owner"])
+            return c.post(f"/api/v1/devices/{self.w['a']['dev'].pk}/rotate-key/")
+
+        r = await database_sync_to_async(rotar)()
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(await self._closed(comm))
+
+    async def test_desactivar_el_dispositivo_corta_la_conexion(self):
+        comm = await self._connect("a")
+        await comm.receive_json_from()
+
+        def desactivar():
+            from rest_framework.test import APIClient
+
+            c = APIClient()
+            c.force_authenticate(self.u["owner"])
+            return c.patch(f"/api/v1/devices/{self.w['a']['dev'].pk}/", {"is_active": False}, format="json")
+
+        r = await database_sync_to_async(desactivar)()
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(await self._closed(comm))
+
+    async def test_token_pedido_antes_de_regenerar_la_clave_ya_no_sirve(self):
+        from apps.control.tokens import issue_device_ws_token
+        from config.asgi import application
+
+        token = await database_sync_to_async(issue_device_ws_token)(self.w["a"]["dev"])   # con la clave vieja
+
+        def rotar():
+            dev = Device.objects.get(pk=self.w["a"]["dev"].pk)
+            dev.set_api_key()
+            dev.save()
+
+        await database_sync_to_async(rotar)()
+        comm = WebsocketCommunicator(application, f"/ws/device/?token={token}")
+        ok, _ = await comm.connect()
+        self.assertFalse(ok)
+
+    async def test_numeros_gigantes_no_tumban_la_conexion(self):
+        from apps.control import services
+
+        comm = await self._connect("a")
+        await comm.receive_json_from()
+        loop = await database_sync_to_async(ControlLoop.objects.create)(
+            greenhouse=self.w["a"]["gh"], name="L", sensor=self.w["a"]["sensor"],
+            actuator=self.w["a"]["act"], device=self.w["a"]["dev"], setpoint=25,
+        )
+        big = 10 ** 400
+        await comm.send_json_to({"event": "telemetry", "loop_id": loop.pk, "pv": big, "output": big})
+        await comm.send_json_to({"event": "ack", "loop_id": loop.pk, "version": big})
+        await comm.send_json_to({"event": "readings", "readings": [{"sensor_id": 2 ** 70, "value": big}]})
+        msg = await comm.receive_json_from(timeout=2)
+        self.assertEqual(msg["event"], "readings_result")                 # se rechaza normal
+        self.assertTrue(services.is_online(self.w["a"]["dev"].pk))        # y la conexión sigue viva
+        await comm.send_json_to({"event": "readings", "readings": [{"sensor_id": self.w["a"]["sensor"].pk, "value": 22}]})
+        self.assertTrue(await comm.receive_nothing(timeout=0.3))
+        await comm.disconnect()
+
+    async def test_el_limite_es_por_dispositivo_aunque_abra_varias_conexiones(self):
+        layer = await self._probe("p_multi")
+        c1 = await self._connect("a")
+        await c1.receive_json_from()
+        c2 = await self._connect("a")              # dos placas con la misma clave: se permite
+        await c2.receive_json_from()
+        sid = self.w["a"]["sensor"].pk
+        lote = [{"sensor_id": sid, "value": 20 + i / 100} for i in range(20)]
+        for comm in (c1, c2, c1):                  # 60 lecturas seguidas entre las dos conexiones
+            await comm.send_json_to({"event": "readings", "readings": lote})
+        got = await self._events(layer, "p_multi", "sensor_reading")
+        self.assertLess(len(got), 60)              # el límite (30 cada 3 s) es compartido
+        self.assertGreaterEqual(len(got), 20)
+        await c1.disconnect()
+        await c2.disconnect()
 
     async def _wait(self, cond, tries=40):
         import asyncio
@@ -561,6 +648,66 @@ class DeviceRealtimeTests(TransactionTestCase):
             if await database_sync_to_async(cond)():
                 return
             await asyncio.sleep(0.05)
+
+
+class AislamientoEntreInvernaderosTests(APITestCase):
+    """Nada propio se puede mover o conectar a un invernadero ajeno."""
+
+    def setUp(self):
+        cache.clear()
+        self.w = build_world()
+        self.u = make_users(self.w)
+        self.client.force_authenticate(self.u["owner"])     # dueño solo de A
+
+    def test_no_se_mueve_a_otro_invernadero(self):
+        from apps.greenhouses.models import Zone
+
+        a, b = self.w["a"], self.w["b"]
+        zone = Zone.objects.create(name="z", greenhouse=a["gh"])
+        for url in (f"/api/v1/devices/{a['dev'].pk}/", f"/api/v1/sensors/{a['sensor'].pk}/",
+                    f"/api/v1/actuators/{a['act'].pk}/", f"/api/v1/zones/{zone.pk}/"):
+            r = self.client.patch(url, {"greenhouse": b["gh"].pk}, format="json")
+            self.assertEqual(r.status_code, 400, url)
+        self.assertEqual(Device.objects.get(pk=a["dev"].pk).greenhouse_id, a["gh"].pk)
+        self.assertEqual(Sensor.objects.get(pk=a["sensor"].pk).greenhouse_id, a["gh"].pk)
+        self.assertEqual(Actuator.objects.get(pk=a["act"].pk).greenhouse_id, a["gh"].pk)
+        # editar lo demás sigue funcionando
+        self.assertEqual(self.client.patch(f"/api/v1/devices/{a['dev'].pk}/", {"name": "nuevo"}, format="json").status_code, 200)
+
+    def test_no_se_cambia_el_dispositivo_de_algo_que_usa_un_lazo(self):
+        a = self.w["a"]
+        ControlLoop.objects.create(greenhouse=a["gh"], name="L", sensor=a["sensor"], actuator=a["act"],
+                                   device=a["dev"], setpoint=25)
+        otro = Device.objects.create(name="otro", greenhouse=a["gh"])
+        for url in (f"/api/v1/sensors/{a['sensor'].pk}/", f"/api/v1/actuators/{a['act'].pk}/"):
+            r = self.client.patch(url, {"device": otro.pk}, format="json")
+            self.assertEqual(r.status_code, 400, url)
+            self.assertIn("lazo", str(r.json()))
+
+    def test_ingesta_http_con_ids_gigantes_o_demasiadas_lecturas(self):
+        a = self.w["a"]
+        self.client.force_authenticate(None)       # aquí entra el ESP32 con su clave, no una persona
+        hdr = {"HTTP_X_DEVICE_KEY": a["raw"]}
+        r = self.client.post("/api/v1/readings/ingest/", {"sensor_id": 2 ** 70, "value": 1}, format="json", **hdr)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["rejected"], 1)
+        many = {"readings": [{"sensor_id": a["sensor"].pk, "value": 20}] * 101}
+        self.assertEqual(self.client.post("/api/v1/readings/ingest/", many, format="json", **hdr).status_code, 400)
+        # el mismo límite por dispositivo que el WebSocket (30 cada 3 s): un lote de 40 no pasa
+        cache.clear()
+        lote = {"readings": [{"sensor_id": a["sensor"].pk, "value": 20}] * 40}
+        self.assertEqual(self.client.post("/api/v1/readings/ingest/", lote, format="json", **hdr).status_code, 429)
+
+    def test_no_se_conecta_el_dispositivo_de_otro_invernadero(self):
+        a, b = self.w["a"], self.w["b"]
+        dev_b = b["dev"].pk
+        self.assertEqual(self.client.patch(f"/api/v1/sensors/{a['sensor'].pk}/", {"device": dev_b}, format="json").status_code, 400)
+        self.assertEqual(self.client.patch(f"/api/v1/actuators/{a['act'].pk}/", {"device": dev_b}, format="json").status_code, 400)
+        r = self.client.post("/api/v1/sensors/", {"name": "x", "greenhouse": a["gh"].pk,
+                                                  "sensor_type": a["sensor"].sensor_type_id, "device": dev_b}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(Sensor.objects.get(pk=a["sensor"].pk).device_id, a["dev"].pk)
+        self.assertEqual(Actuator.objects.get(pk=a["act"].pk).device_id, a["dev"].pk)
 
 
 class OriginEnProduccionTests(TransactionTestCase):

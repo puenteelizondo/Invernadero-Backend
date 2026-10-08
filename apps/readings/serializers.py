@@ -56,12 +56,11 @@ class ReadingIngestItemSerializer(serializers.Serializer):
             sensor = Sensor.objects.select_related("sensor_type", "greenhouse").filter(
                 pk=attrs["sensor_id"]
             ).first()
-        if sensor is None:
-            raise serializers.ValidationError({"sensor_id": "El sensor no existe."})
-
-        if sensor.device_id != device.id:
+        # Mismo mensaje si no existe o es de otro dispositivo: así un dispositivo
+        # no puede averiguar qué ids de sensores existen en otros invernaderos.
+        if sensor is None or sensor.device_id != device.id:
             raise serializers.ValidationError(
-                {"sensor_id": "Este sensor no está asignado a tu dispositivo."}
+                {"sensor_id": "El sensor no existe o no está asignado a este dispositivo."}
             )
         if not sensor.is_active:
             raise serializers.ValidationError({"sensor_id": "El sensor está inactivo."})
@@ -108,4 +107,4 @@ class ReadingExportQuerySerializer(serializers.Serializer):
         if "sensor" in attrs and not Sensor.objects.filter(pk=attrs["sensor"]).exists():
             raise serializers.ValidationError({"sensor": "El sensor no existe."})
 
-        return attrs
+        return attrs

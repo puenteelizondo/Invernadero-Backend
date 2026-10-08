@@ -62,6 +62,22 @@ def push_to_device(device_id, event: str, **data) -> None:
     )
 
 
+def close_device_connections(device_id, except_channel=None) -> None:
+    """
+    Cierra al instante los WebSocket abiertos de un dispositivo: al regenerar
+    su clave, al desactivarlo o borrarlo (la clave solo se revisa al conectar,
+    así que una conexión ya abierta seguiría viva). `except_channel` deja viva
+    una conexión concreta (no se usa hoy).
+    """
+    layer = get_channel_layer()
+    if layer is None:
+        return
+    async_to_sync(layer.group_send)(
+        device_group(device_id),
+        {"type": "device_close", "except_channel": except_channel},
+    )
+
+
 def loop_event_payload(loop) -> dict:
     """Resumen público de un lazo para el grupo WebSocket del invernadero."""
     return {

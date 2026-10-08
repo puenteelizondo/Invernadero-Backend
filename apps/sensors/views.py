@@ -55,6 +55,10 @@ class DeviceViewSet(GreenhouseScopedMixin, viewsets.ModelViewSet):
         device = self.get_object()  # aquí sí corre IsGreenhouseMember: solo el Owner
         raw_key = device.set_api_key()
         device.save()
+        # La clave vieja deja de servir también para las conexiones YA abiertas.
+        from apps.control.services import close_device_connections
+
+        close_device_connections(device.pk)
         return Response(
             {
                 "id": device.id,
@@ -63,6 +67,21 @@ class DeviceViewSet(GreenhouseScopedMixin, viewsets.ModelViewSet):
                 "warning": "Guarda esta clave ahora. No se volverá a mostrar.",
             }
         )
+
+
+    def perform_update(self, serializer):
+        device = serializer.save()
+        if not device.is_active:     # desactivado: se corta su WebSocket en ese momento
+            from apps.control.services import close_device_connections
+
+            close_device_connections(device.pk)
+
+    def perform_destroy(self, instance):
+        pk = instance.pk
+        instance.delete()
+        from apps.control.services import close_device_connections
+
+        close_device_connections(pk)
 
 
 class SensorViewSet(GreenhouseScopedMixin, viewsets.ModelViewSet):
