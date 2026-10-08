@@ -2,7 +2,7 @@ from channels.db import database_sync_to_async
 from channels.layers import get_channel_layer
 from channels.testing import WebsocketCommunicator
 from django.core.cache import cache
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
 from rest_framework.test import APITestCase
 
 from apps.actuators.models import Actuator, ActuatorType
@@ -79,6 +79,16 @@ class ControlLoopApiTests(APITestCase):
         r = self.client.post(f"/api/v1/sensors/{a['sensor'].pk}/purge/", {"confirm_name": a["sensor"].name}, format="json")
         self.assertEqual(r.status_code, 409)
         self.assertEqual(ControlLoop.objects.count(), 1)
+
+    def test_encender_a_mano_un_actuador_con_lazo_activo_da_409(self):
+        self.assertEqual(self._create("owner", enabled=True).status_code, 201)   # PID activo
+        self.client.force_authenticate(self.u["owner"])
+        url = f"/api/v1/actuators/{self.w['a']['act'].pk}/state/"
+        r = self.client.post(url, {"state": True}, format="json")
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("Temperatura nave", r.json()["detail"])
+        ControlLoop.objects.update(mode="off")                       # lazo apagado: vuelve el manual
+        self.assertEqual(self.client.post(url, {"state": True}, format="json").status_code, 200)
 
     # ---- permisos ----
     def test_owner_y_operator_crean_viewer_no(self):
@@ -276,6 +286,7 @@ class DeviceWebSocketTests(TransactionTestCase):
     async def test_config_update_llega_al_cambiar_por_api(self):
         comm, _ = await self._connect("a")
         await comm.receive_json_from()   # config
+        await comm.receive_json_from()   # actuators
 
         def patch():
             from rest_framework.test import APIClient
@@ -383,6 +394,167 @@ class DeviceWebSocketTests(TransactionTestCase):
         self.assertFalse(services.is_online(self.w["a"]["dev"].pk))
 
     async def _wait_for(self, cond, tries=40):
+        import asyncio
+
+        for _ in range(tries):
+            if await database_sync_to_async(cond)():
+                return
+            await asyncio.sleep(0.05)
+
+
+@override_settings(EMAIL_ASYNC=False)
+class DeviceRealtimeTests(TransactionTestCase):
+    """Lecturas que el ESP32 manda por su WebSocket, y órdenes a sus actuadores por el mismo canal."""
+
+    def setUp(self):
+        cache.clear()
+        self.w = build_world()
+        self.u = make_users(self.w)
+        a = self.w["a"]
+        self.manual = Actuator.objects.create(
+            name="ventilador", actuator_type=a["act"].actuator_type, greenhouse=a["gh"], device=a["dev"], state=True,
+        )
+        Sensor.objects.filter(pk=a["sensor"].pk).update(persist_interval_seconds=60)
+
+    async def _connect(self, key="a"):
+        from apps.control.tokens import issue_device_ws_token
+        from config.asgi import application
+
+        token = await database_sync_to_async(issue_device_ws_token)(self.w[key]["dev"])
+        comm = WebsocketCommunicator(application, f"/ws/device/?token={token}")
+        ok, _ = await comm.connect()
+        self.assertTrue(ok)
+        self.assertEqual((await comm.receive_json_from())["event"], "config")
+        return comm
+
+    async def _probe(self, name):
+        layer = get_channel_layer()
+        await layer.group_add("greenhouse_%d" % self.w["a"]["gh"].pk, name)
+        return layer
+
+    async def _events(self, layer, name, kind, wait=0.5):
+        import asyncio
+
+        got = []
+        while True:
+            try:
+                m = await asyncio.wait_for(layer.receive(name), wait)
+            except asyncio.TimeoutError:
+                return got
+            if m.get("event") == kind:
+                got.append(m["payload"])
+
+    # ---- actuadores ----------------------------------------------------------
+    async def test_al_conectar_recibe_el_estado_de_sus_actuadores(self):
+        comm = await self._connect("a")
+        msg = await comm.receive_json_from()
+        self.assertEqual(msg["event"], "actuators")
+        self.assertEqual(msg["actuators"], [
+            {"id": self.w["a"]["act"].pk, "state": False}, {"id": self.manual.pk, "state": True},
+        ])
+        await comm.disconnect()
+        comm_b = await self._connect("b")
+        msg = await comm_b.receive_json_from()
+        self.assertEqual([x["id"] for x in msg["actuators"]], [self.w["b"]["act"].pk])   # nada del otro
+        await comm_b.disconnect()
+
+    async def test_cambio_desde_la_pagina_llega_al_instante_solo_a_su_esp32(self):
+        import time
+
+        comm_a = await self._connect("a")
+        await comm_a.receive_json_from()
+        comm_b = await self._connect("b")
+        await comm_b.receive_json_from()
+
+        def apagar():
+            from rest_framework.test import APIClient
+
+            c = APIClient()
+            c.force_authenticate(User.objects.get(username="operator"))
+            return c.post(f"/api/v1/actuators/{self.manual.pk}/state/", {"state": False}, format="json")
+
+        t0 = time.monotonic()
+        r = await database_sync_to_async(apagar)()
+        self.assertEqual(r.status_code, 200, r.content)
+        msg = await comm_a.receive_json_from(timeout=2)
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertEqual(msg, {"event": "actuator_state", "actuator_id": self.manual.pk, "state": False})
+        self.assertTrue(await comm_b.receive_nothing(timeout=0.3))
+        await comm_a.disconnect()
+        await comm_b.disconnect()
+
+    # ---- lecturas ------------------------------------------------------------
+    async def test_lecturas_llegan_a_la_pagina_y_se_guardan_segun_la_regla(self):
+        from apps.readings.models import Reading
+
+        layer = await self._probe("p_ok")
+        comm = await self._connect("a")
+        await comm.receive_json_from()
+        sid = self.w["a"]["sensor"].pk
+        await comm.send_json_to({"event": "readings", "readings": [{"sensor_id": sid, "value": 24.5}]})
+        await comm.send_json_to({"event": "readings", "readings": [{"sensor_id": sid, "value": 24.6}]})
+        got = await self._events(layer, "p_ok", "sensor_reading")
+        self.assertEqual([g["value"] for g in got], [24.5, 24.6])
+        self.assertEqual([g["persisted"] for g in got], [True, False])     # "guardar cada 60 s"
+        self.assertEqual(await database_sync_to_async(Reading.objects.count)(), 1)
+        self.assertTrue(await comm.receive_nothing(timeout=0.2))           # todo bien: no hay aviso
+        await comm.disconnect()
+
+    async def test_sensor_ajeno_o_fuera_de_rango_se_rechaza_y_avisa(self):
+        from apps.readings.models import Reading
+
+        layer = await self._probe("p_bad")
+        comm = await self._connect("a")
+        await comm.receive_json_from()
+        await comm.send_json_to({"event": "readings", "readings": [
+            {"sensor_id": self.w["b"]["sensor"].pk, "value": 20},     # de otro dispositivo
+            {"sensor_id": self.w["a"]["sensor"].pk, "value": 999},    # fuera del rango válido
+            {"sensor_id": "x", "value": "y"},
+        ]})
+        msg = await comm.receive_json_from(timeout=2)
+        self.assertEqual(msg["event"], "readings_result")
+        self.assertEqual(len(msg["rejected"]), 3)
+        self.assertEqual(await self._events(layer, "p_bad", "sensor_reading", wait=0.3), [])
+        self.assertEqual(await database_sync_to_async(Reading.objects.count)(), 0)
+        await comm.send_json_to({"event": "readings", "readings": "no es lista"})
+        await comm.disconnect()
+
+    async def test_lectura_por_ws_dispara_alerta_y_correo(self):
+        from django.core import mail
+
+        from apps.alerts.models import Alert, AlertRule
+
+        def preparar():
+            owner = self.u["owner"]
+            owner.email = "duena@example.com"
+            owner.save()
+            AlertRule.objects.create(sensor=self.w["a"]["sensor"], greenhouse=self.w["a"]["gh"], max_value=30)
+
+        await database_sync_to_async(preparar)()
+        comm = await self._connect("a")
+        await comm.receive_json_from()
+        await comm.send_json_to({"event": "readings", "readings": [{"sensor_id": self.w["a"]["sensor"].pk, "value": 41}]})
+        await self._wait(lambda: Alert.objects.count() == 1)
+        self.assertEqual(await database_sync_to_async(Alert.objects.count)(), 1)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["duena@example.com"])
+        await comm.disconnect()
+
+    async def test_limite_de_lecturas_por_conexion(self):
+        layer = await self._probe("p_lim")
+        comm = await self._connect("a")
+        await comm.receive_json_from()
+        sid = self.w["a"]["sensor"].pk
+        lote = [{"sensor_id": sid, "value": 20 + i / 10} for i in range(20)]
+        await comm.send_json_to({"event": "readings", "readings": lote})       # 20 de 30 fichas
+        await comm.send_json_to({"event": "readings", "readings": lote})       # ya no alcanza
+        msg = await comm.receive_json_from(timeout=2)
+        self.assertEqual((msg["event"], msg["error"]), ("readings_result", "rate_limited"))
+        got = await self._events(layer, "p_lim", "sensor_reading")
+        self.assertEqual(len(got), 20)
+        await comm.disconnect()
+
+    async def _wait(self, cond, tries=40):
         import asyncio
 
         for _ in range(tries):

@@ -114,6 +114,12 @@ class Actuator(models.Model):
                 "source": source,
             },
         )
+        # Aviso inmediato al ESP32 dueño del actuador (si está conectado por su
+        # WebSocket): así obedece al instante, sin tener que preguntar.
+        if self.device_id:
+            from apps.control.services import push_to_device
+
+            push_to_device(self.device_id, "actuator_state", actuator_id=self.id, state=self.state)
         return True
 
 
@@ -150,4 +156,4 @@ class ActuatorStateHistory(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.actuator.name} → {'ON' if self.state else 'OFF'} @ {self.changed_at}"
+        return f"{self.actuator.name} → {'ON' if self.state else 'OFF'} @ {self.changed_at}"

@@ -17,6 +17,13 @@ PING_EVERY = 25          # s entre ping y ping
 IDLE_LIMIT = 75          # s sin recibir NADA => se cierra la conexión
 TELEMETRY_MIN_GAP = 0.5  # s: el servidor retransmite como máximo 2 mensajes/s por lazo
 MAX_MESSAGE_BYTES = 4096
+# Lecturas por WebSocket: cubeta de fichas por conexión. Se aceptan hasta
+# READINGS_BURST lecturas seguidas y luego READINGS_PER_SEC por segundo
+# (de sobra para un ESP32 con varios sensores leyendo cada segundo).
+READINGS_PER_SEC = 10
+READINGS_BURST = 30
+MAX_READINGS_PER_MESSAGE = 20
+RESULT_NOTICE_GAP = 5.0  # s entre avisos de "lecturas rechazadas" al dispositivo
 
 
 def _num(value):
@@ -33,11 +40,17 @@ class DeviceConsumer(AsyncWebsocketConsumer):
     WebSocket del DISPOSITIVO: /ws/device/?token=<token de POST /api/v1/devices/ws-token/>
 
     servidor -> dispositivo:  config | config_update | config_remove | ping
-    dispositivo -> servidor:  ack | telemetry | pong | hello
+                              actuators (al conectar) | actuator_state | readings_result
+    dispositivo -> servidor:  ack | telemetry | readings | pong | hello
 
-    El dispositivo solo recibe SUS lazos y solo puede confirmar/reportar sobre
-    ellos. La telemetría se guarda únicamente en caché (Redis) y se retransmite
-    al grupo del invernadero; nunca se guarda como Reading.
+    El dispositivo solo recibe SUS lazos y SUS actuadores, y solo puede
+    confirmar/reportar sobre ellos. La telemetría se guarda únicamente en
+    caché (Redis) y se retransmite al grupo del invernadero; nunca se guarda
+    como Reading.
+
+    "readings" pasa por la MISMA ingesta que POST /api/v1/readings/ingest/
+    (apps/readings/ingest.py): mismas validaciones (solo sensores de este
+    dispositivo, rango válido), alertas y regla de "guardar cada N".
     """
 
     async def connect(self):
@@ -57,6 +70,9 @@ class DeviceConsumer(AsyncWebsocketConsumer):
         self._last_seen_write = 0.0
         self._joined = False
         self._ping_task = None
+        self._tokens = float(READINGS_BURST)
+        self._tokens_at = time.monotonic()
+        self._last_notice = 0.0
 
         await self.channel_layer.group_add(self.group, self.channel_name)
         self._joined = True
@@ -66,6 +82,9 @@ class DeviceConsumer(AsyncWebsocketConsumer):
 
         payloads = await self._load_loops()
         await self.send_json({"event": "config", "loops": payloads})
+        # Estado actual de los actuadores de este dispositivo: el que maneja un
+        # actuador "a mano" (sin lazo) se pone al día en cuanto se conecta.
+        await self.send_json({"event": "actuators", "actuators": await self._load_actuators()})
         self._ping_task = asyncio.ensure_future(self._keepalive())
 
     async def disconnect(self, code):
@@ -109,7 +128,41 @@ class DeviceConsumer(AsyncWebsocketConsumer):
             await self._on_ack(msg)
         elif event == "telemetry":
             await self._on_telemetry(msg)
+        elif event == "readings":
+            await self._on_readings(msg)
         # "pong" y "hello" solo sirven para mantener viva la conexión.
+
+    async def _on_readings(self, msg):
+        items = msg.get("readings")
+        if not isinstance(items, list) or not items:
+            return
+        items = items[:MAX_READINGS_PER_MESSAGE]
+
+        now = time.monotonic()
+        self._tokens = min(READINGS_BURST, self._tokens + (now - self._tokens_at) * READINGS_PER_SEC)
+        self._tokens_at = now
+        if self._tokens < len(items):
+            await self._notice({"error": "rate_limited",
+                                "detail": f"Demasiadas lecturas: máximo {READINGS_PER_SEC} por segundo."})
+            return
+        self._tokens -= len(items)
+
+        result = await self._ingest(items)
+        rejected = [r for r in result["results"] if r["status"] != "accepted"]
+        if rejected:
+            await self._notice({"rejected": [
+                {"sensor_id": items[r["index"]].get("sensor_id") if isinstance(items[r["index"]], dict) else None,
+                 "errors": r.get("errors")}
+                for r in rejected[:5]
+            ]})
+
+    async def _notice(self, data):
+        """Avisa al dispositivo (para el monitor serie), sin inundarlo: 1 aviso cada pocos segundos."""
+        now = time.monotonic()
+        if now - self._last_notice < RESULT_NOTICE_GAP:
+            return
+        self._last_notice = now
+        await self.send_json({"event": "readings_result", **data})
 
     async def _on_ack(self, msg):
         loop_id, version = msg.get("loop_id"), msg.get("version")
@@ -189,6 +242,28 @@ class DeviceConsumer(AsyncWebsocketConsumer):
         loops = list(ControlLoop.objects.filter(device_id=self.device_id))
         self.loops = {l.pk: {"actuator_id": l.actuator_id} for l in loops}
         return [l.device_payload() for l in loops]
+
+    @database_sync_to_async
+    def _load_actuators(self):
+        from apps.actuators.models import Actuator
+
+        return [
+            {"id": pk, "state": state}
+            for pk, state in Actuator.objects.filter(device_id=self.device_id, is_active=True)
+            .order_by("pk").values_list("pk", "state")
+        ]
+
+    @database_sync_to_async
+    def _ingest(self, items):
+        from apps.readings.ingest import ingest_readings
+        from apps.sensors.models import Device
+
+        device = Device.objects.filter(pk=self.device_id, is_active=True).first()
+        if device is None:      # lo desactivaron mientras estaba conectado
+            return {"accepted": 0, "persisted": 0, "rejected": len(items),
+                    "results": [{"index": i, "status": "rejected", "errors": "Dispositivo inactivo."}
+                                for i in range(len(items))]}
+        return ingest_readings(device, items)
 
     @database_sync_to_async
     def _save_ack(self, loop_id, version):

@@ -8,8 +8,13 @@
  *   3. Aplica cada lazo, lo guarda en memoria no volátil (Preferences) y responde `ack`.
  *   4. Cada `sample_time_ms` lee la variable de proceso, calcula la salida y la aplica
  *      (PWM, o "proporcional en el tiempo" para relevadores). Manda `telemetry`.
- *   5. Manda las lecturas de los sensores por HTTP a /api/v1/readings/ingest/ (la ingesta normal).
- *   6. Si se cae la red SIGUE controlando con la última configuración válida guardada.
+ *   5. Manda las lecturas de los sensores por el MISMO WebSocket (evento `readings`) cada
+ *      LECTURAS_CADA_MS: llegan a la página en milisegundos y el lazo nunca se pausa.
+ *      Si el WebSocket está caído, las manda por HTTP (/api/v1/readings/ingest/) cada
+ *      INGEST_EVERY_MS como respaldo.
+ *   6. Obedece al instante a los actuadores MANUALES de este ESP32 (los de HW[] que no
+ *      maneja ningún lazo): el servidor avisa por el WebSocket cuando cambian en la página.
+ *   7. Si se cae la red SIGUE controlando con la última configuración válida guardada.
  *
  * El servidor NUNCA calcula la salida del lazo: solo guarda y entrega la configuración.
  *
@@ -57,7 +62,8 @@ struct Lazo {
 #define PWM_FREQ          1000
 #define PWM_BITS          10
 #define RELAY_WINDOW_MS   10000          // ventana de "proporcional en el tiempo" para relevadores
-#define INGEST_EVERY_MS   5000           // cada cuánto se mandan las lecturas por HTTP
+#define LECTURAS_CADA_MS  1000           // cada cuánto se mandan las lecturas por WebSocket (mín. 200)
+#define INGEST_EVERY_MS   5000           // respaldo por HTTP, solo mientras el WebSocket está caído
 #define HARD_MAX_OUTPUT   100.0f         // tope absoluto de seguridad, pase lo que pase en la config
 
 // Qué pin maneja cada actuador (ids = los de la plataforma). relay=true => proporcional en el tiempo.
@@ -83,7 +89,13 @@ Lazo LAZOS[MAX_LOOPS];
 Preferences prefs;
 WebSocketsClient ws;
 bool wsUp = false;
-uint32_t nextConnect = 0, backoffMs = 1000, lastIngest = 0;
+uint32_t nextConnect = 0, backoffMs = 1000, lastIngest = 0, lastLecturas = 0;
+
+const int N_HW = sizeof(HW) / sizeof(HW[0]);
+const int N_SENSORES = sizeof(SENSORES) / sizeof(SENSORES[0]);
+int8_t manualOn[N_HW];                  // actuadores sin lazo: -1 = sin orden aún, 0 = apagado, 1 = encendido
+float ultimoValor[N_SENSORES];          // última medición de cada sensor (la reusa el envío de lecturas)
+uint32_t ultimoValorMs[N_SENSORES];
 
 // ---------------------------------------------------------------- utilidades
 Lazo* buscar(int id) {
@@ -97,6 +109,21 @@ Lazo* nuevo() {
 Hw* hwDe(int actuatorId) {
   for (auto& h : HW) if (h.actuatorId == actuatorId) return &h;
   return nullptr;
+}
+int indiceHw(int actuatorId) {
+  for (int k = 0; k < N_HW; k++) if (HW[k].actuatorId == actuatorId) return k;
+  return -1;
+}
+bool loManejaUnLazo(int actuatorId) {
+  for (auto& l : LAZOS) if (l.used && l.actuatorId == actuatorId) return true;
+  return false;
+}
+// Mide un sensor y recuerda el valor (para no medirlo dos veces seguidas).
+float medir(int sensorId) {
+  float v = leerSensor(sensorId);
+  for (int k = 0; k < N_SENSORES; k++)
+    if (SENSORES[k] == sensorId && !isnan(v)) { ultimoValor[k] = v; ultimoValorMs[k] = millis(); }
+  return v;
 }
 float limitar(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -216,6 +243,24 @@ void aplicarSalida(Lazo& l, float pct) {
   }
 }
 
+// Actuador manual (sin lazo): encendido = 100 %, apagado = 0 %.
+void aplicarManual(int k) {
+  if (manualOn[k] < 0) return;
+  Hw& h = HW[k];
+  bool on = manualOn[k] == 1;
+  if (h.relay) digitalWrite(h.pin, (on != h.activeLow) ? HIGH : LOW);
+  else ledcWrite(h.pin, (on != h.activeLow) ? ((1 << PWM_BITS) - 1) : 0);
+}
+
+// Orden del servidor para un actuador. Si lo maneja un lazo, manda el lazo y se ignora.
+void ordenActuador(int actuatorId, bool on) {
+  int k = indiceHw(actuatorId);
+  if (k < 0 || loManejaUnLazo(actuatorId)) return;
+  if (manualOn[k] != (on ? 1 : 0)) Serial.printf("[actuador %d] %s\n", actuatorId, on ? "ENCENDIDO" : "apagado");
+  manualOn[k] = on ? 1 : 0;
+  aplicarManual(k);
+}
+
 void apagarTodo() {
   for (auto& h : HW) {
     if (h.relay) digitalWrite(h.pin, h.activeLow ? HIGH : LOW);
@@ -252,6 +297,13 @@ void alEventoWS(WStype_t tipo, uint8_t* payload, size_t len) {
       } else if (!strcmp(ev, "config_remove")) {
         int id = d["loop_id"] | 0;
         if (Lazo* l = buscar(id)) { l->used = false; borrarLazoGuardado(id); }
+      } else if (!strcmp(ev, "actuators")) {
+        for (JsonObjectConst a : d["actuators"].as<JsonArrayConst>()) ordenActuador(a["id"] | 0, a["state"] | false);
+      } else if (!strcmp(ev, "actuator_state")) {
+        ordenActuador(d["actuator_id"] | 0, d["state"] | false);
+      } else if (!strcmp(ev, "readings_result")) {
+        String s; serializeJson(d, s);
+        Serial.println("[lecturas] el servidor avisa: " + s);
       } else if (!strcmp(ev, "ping")) {
         ws.sendTXT("{\"event\":\"pong\"}");
       }
@@ -290,17 +342,33 @@ void conectarWS() {
   nextConnect = millis() + 15000;                    // si no conecta en 15 s, se vuelve a intentar
 }
 
-// ---------------------------------------------------------------- ingesta HTTP de lecturas
+// ---------------------------------------------------------------- lecturas
+// Arma {"readings":[...]} con todos los sensores. Si un lazo acaba de medir un sensor,
+// reusa ese valor en vez de volver a medirlo (algunos sensores no aguantan lecturas seguidas).
+bool armarLecturas(JsonDocument& d, uint32_t frescoMs) {
+  JsonArray arr = d["readings"].to<JsonArray>();
+  uint32_t now = millis();
+  for (int k = 0; k < N_SENSORES; k++) {
+    float v = (ultimoValorMs[k] && now - ultimoValorMs[k] < frescoMs) ? ultimoValor[k] : medir(SENSORES[k]);
+    if (isnan(v)) continue;
+    JsonObject o = arr.add<JsonObject>(); o["sensor_id"] = SENSORES[k]; o["value"] = roundf(v * 100) / 100;
+  }
+  return arr.size() > 0;
+}
+
+// Por el WebSocket ya abierto: tarda milisegundos y no detiene el lazo.
+void enviarLecturasWS() {
+  JsonDocument d;
+  d["event"] = "readings";
+  if (!armarLecturas(d, LECTURAS_CADA_MS)) return;
+  String s; serializeJson(d, s); ws.sendTXT(s);
+}
+
+// Respaldo por HTTP (solo mientras el WebSocket está caído).
 void enviarLecturas() {
   if (WiFi.status() != WL_CONNECTED) return;
   JsonDocument d;
-  JsonArray arr = d["readings"].to<JsonArray>();
-  for (int sid : SENSORES) {
-    float v = leerSensor(sid);
-    if (isnan(v)) continue;
-    JsonObject o = arr.add<JsonObject>(); o["sensor_id"] = sid; o["value"] = roundf(v * 100) / 100;
-  }
-  if (arr.size() == 0) return;
+  if (!armarLecturas(d, INGEST_EVERY_MS)) return;
   String body; serializeJson(d, body);
   HTTPClient http;
   http.begin(String(USE_TLS ? "https://" : "http://") + SERVER_HOST + ":" + SERVER_PORT + "/api/v1/readings/ingest/");
@@ -318,6 +386,8 @@ void setup() {
     else { ledcAttach(h.pin, PWM_FREQ, PWM_BITS); }
   }
   apagarTodo();                                      // arranca SIEMPRE con las salidas apagadas
+  for (int k = 0; k < N_HW; k++) manualOn[k] = -1;
+  for (int k = 0; k < N_SENSORES; k++) { ultimoValor[k] = NAN; ultimoValorMs[k] = 0; }
 
   // Última configuración válida guardada: el lazo funciona aunque no haya red.
   prefs.begin("control", false);
@@ -350,7 +420,7 @@ void loop() {
     float dt = (l.lastRun == 0) ? l.sampleMs / 1000.0f : (now - l.lastRun) / 1000.0f;
     l.lastRun = now;
 
-    float pv = leerSensor(l.sensorId);
+    float pv = medir(l.sensorId);
     if (!isnan(pv)) l.lastValidPv = now;
 
     float salida;
@@ -375,5 +445,10 @@ void loop() {
     }
   }
 
-  if (now - lastIngest >= INGEST_EVERY_MS) { lastIngest = now; enviarLecturas(); }
+  if (wsUp) {
+    if (now - lastLecturas >= max<uint32_t>(LECTURAS_CADA_MS, 200)) { lastLecturas = now; enviarLecturasWS(); }
+  } else if (now - lastIngest >= INGEST_EVERY_MS) {
+    lastIngest = now; enviarLecturas();
+  }
+  for (int k = 0; k < N_HW; k++) if (!loManejaUnLazo(HW[k].actuatorId)) aplicarManual(k);
 }

@@ -1075,6 +1075,9 @@ Servidor → dispositivo:
 | `config` | `{"loops": [...]}` | Al conectar (todos los lazos del dispositivo). |
 | `config_update` | `{"loop": {...}}` | Al crear o cambiar un lazo. |
 | `config_remove` | `{"loop_id": 3}` | Al borrar un lazo. |
+| `actuators` | `{"actuators": [{"id": 12, "state": false}, ...]}` | Al conectar, justo después de `config`: estado actual de los actuadores **activos asignados a este dispositivo**. |
+| `actuator_state` | `{"actuator_id": 12, "state": true}` | **Al instante**, cada vez que cambia el estado de uno de sus actuadores (desde la web con `POST /api/v1/actuators/{id}/state/`, o por un lazo). Solo le llega al dispositivo dueño del actuador. |
+| `readings_result` | `{"rejected": [{"sensor_id", "errors"}]}` o `{"error": "rate_limited", "detail"}` | Solo si algo de un `readings` se rechazó; como mucho un aviso cada 5 s. |
 | `ping` | — | Cada 25 s. Si no llega nada del dispositivo en 75 s, se cierra con código 4408. |
 
 Dispositivo → servidor:
@@ -1084,11 +1087,14 @@ Dispositivo → servidor:
 | `hello` | `{"firmware": "..."}` | Informativo. |
 | `ack` | `{"loop_id", "version"}` | Marca `applied_version`; la web muestra "Aplicado por el ESP32". |
 | `telemetry` | `{"loop_id", "version", "pv", "setpoint", "output", "error", "p", "i", "d", "mode"}` | Se reenvía a la web (máx. 1 cada 0.5 s por lazo). Si `output > 1 %` el actuador se marca encendido (`source="automation"`), si no, apagado; solo cuando cambia. |
+| `readings` | `{"readings": [{"sensor_id": 1, "value": 24.5}, ...]}` | Lecturas por el WebSocket ya abierto (máx. 20 por mensaje). Pasan por **la misma ingesta** que `POST /api/v1/readings/ingest/` (`apps/readings/ingest.py`): solo sensores de este dispositivo, rango válido, alertas y "guardar cada N". Límite por conexión: 10 lecturas/s con ráfagas de hasta 30. |
 | `pong` | — | Mantiene viva la conexión. |
 
 El WebSocket de dispositivos no pasa por el chequeo de `Origin` (ni siquiera en producción): un ESP32 no es un navegador y no lo manda; su protección es el token de un solo uso.
 
-Al grupo del invernadero (el WebSocket de la web) se le mandan `control_loop_updated`, `control_loop_applied`, `control_loop_deleted`, `control_telemetry` y `device_connection`.
+Al grupo del invernadero (el WebSocket de la web) se le mandan `control_loop_updated`, `control_loop_applied`, `control_loop_deleted`, `control_telemetry` y `device_connection` (y `sensor_reading` por cada lectura, igual que con la ingesta HTTP).
+
+**Programas de ejemplo que usan este canal** (los genera la web): el de **Control** manda sus lecturas por `readings` cada `LECTURAS_CADA_MS` (HTTP solo como respaldo si el WebSocket está caído) y obedece a los actuadores manuales de su `HW[]`; el de **un actuador** solo escucha `actuators` / `actuator_state`. Ninguno guarda la contraseña de una persona: usan la `X-Device-Key` de su dispositivo. La consulta `GET /api/v1/actuators/{id}/` con Basic Auth sigue funcionando para programas viejos, pero cada petición comprueba la contraseña (lento a propósito, ~1 s de CPU), así que no conviene para preguntar cada pocos segundos.
 
 ### Probar sin hardware: simulador
 
