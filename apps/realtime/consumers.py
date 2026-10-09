@@ -64,6 +64,11 @@ class GreenhouseConsumer(AsyncWebsocketConsumer):
             "payload": event["payload"],
         }))
 
+    async def broadcast_events(self, message):
+        """Varios eventos juntos (un lote de lecturas): al navegador se le mandan uno por uno, como siempre."""
+        for event in message["events"]:
+            await self.broadcast_event(event)
+
     async def receive(self, text_data=None, bytes_data=None):
         pass
 

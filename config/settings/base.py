@@ -119,6 +119,11 @@ DATABASES = {
         "PASSWORD": env("POSTGRES_PASSWORD"),
         "HOST": env("POSTGRES_HOST"),
         "PORT": env("POSTGRES_PORT", default="5432"),
+        # Reusar la conexión en vez de abrir una nueva en cada petición/mensaje
+        # (con muchos ESP32 mandando cada segundo, conectar a Postgres cada vez
+        # era de lo más caro). CONN_HEALTH_CHECKS descarta las que se cayeron.
+        "CONN_MAX_AGE": env.int("DB_CONN_MAX_AGE", default=60),
+        "CONN_HEALTH_CHECKS": True,
     }
 }
 

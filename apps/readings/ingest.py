@@ -16,7 +16,7 @@ from apps.common.realtime import publish_events
 from apps.sensors.models import Sensor
 
 from .models import Reading
-from .persistence import mark_latest, mark_persisted, should_persist
+from .persistence import load_persisted, mark_latest_many, mark_persisted_many, should_persist
 from .serializers import ReadingIngestItemSerializer
 
 
@@ -60,6 +60,11 @@ def ingest_readings(device, raw_items):
     events = []
     to_create = []
     to_mark_persisted = []
+    latest = {}
+    # Lo último guardado de todos los sensores del lote, en un solo viaje a Redis.
+    persisted_last = load_persisted(
+        [sid for sid, sn in sensors.items() if sn.persist_interval_seconds]
+    )
 
     for index, item in enumerate(raw_items):
         serializer = ReadingIngestItemSerializer(
@@ -71,14 +76,15 @@ def ingest_readings(device, raw_items):
             value = data["value"]
             timestamp = data["timestamp"]
 
-            persisted = should_persist(sensor, value, timestamp)
+            persisted = should_persist(sensor, value, timestamp, last=persisted_last.get(sensor.id))
             if persisted:
+                persisted_last[sensor.id] = {"value": value, "timestamp": timestamp}
                 to_create.append(
                     Reading(sensor=sensor, value=value, timestamp=timestamp)
                 )
                 to_mark_persisted.append((sensor, value, timestamp))
 
-            mark_latest(sensor, value, timestamp)
+            latest[sensor.id] = (value, timestamp)
             sensor_rules = rules.get(sensor.id)
             if sensor_rules:
                 events.extend(alert_engine.evaluate(sensor_rules, sensor, value, timestamp))
@@ -105,12 +111,12 @@ def ingest_readings(device, raw_items):
                 {"index": index, "status": "rejected", "errors": serializer.errors}
             )
 
+    mark_latest_many(latest)
     publish_events(events)
 
     if to_create:
         Reading.objects.bulk_create(to_create, ignore_conflicts=True)
-        for sensor, value, timestamp in to_mark_persisted:
-            mark_persisted(sensor, value, timestamp)
+        mark_persisted_many(to_mark_persisted)
 
     accepted = sum(1 for r in results if r["status"] == "accepted")
     persisted_count = sum(1 for r in results if r.get("persisted"))

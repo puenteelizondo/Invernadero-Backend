@@ -1,5 +1,7 @@
 from django.core.cache import cache
 
+_UNSET = object()   # "no me pasaron lo último guardado: búscalo en Redis"
+
 
 def _persisted_cache_key(sensor_id: int) -> str:
     return f"reading_persist:sensor:{sensor_id}"
@@ -9,7 +11,7 @@ def _latest_cache_key(sensor_id: int) -> str:
     return f"sensor:{sensor_id}:latest"
 
 
-def should_persist(sensor, value: float, timestamp) -> bool:
+def should_persist(sensor, value: float, timestamp, last=_UNSET) -> bool:
     """
     Decide si esta lectura debe escribirse en Postgres, según la
     política de persistencia del sensor (campos ya existentes en
@@ -42,7 +44,8 @@ def should_persist(sensor, value: float, timestamp) -> bool:
     if interval == 0:
         return True
 
-    last = cache.get(_persisted_cache_key(sensor.id))
+    if last is _UNSET:
+        last = cache.get(_persisted_cache_key(sensor.id))
     if last is None:
         # Nunca se ha guardado nada de este sensor: la primera lectura
         # siempre se persiste, para tener un punto de partida.
@@ -76,6 +79,30 @@ def mark_persisted(sensor, value: float, timestamp) -> None:
         {"value": value, "timestamp": timestamp},
         timeout=None,
     )
+
+
+def load_persisted(sensor_ids) -> dict:
+    """Lo último GUARDADO de varios sensores en UN viaje a Redis: {sensor_id: {"value", "timestamp"}}."""
+    keys = {_persisted_cache_key(sid): sid for sid in sensor_ids}
+    if not keys:
+        return {}
+    return {keys[k]: v for k, v in cache.get_many(list(keys)).items()}
+
+
+def mark_latest_many(latest: dict) -> None:
+    """Como mark_latest, para varios sensores en UN viaje a Redis. `latest` = {sensor_id: (value, timestamp)}."""
+    if latest:
+        cache.set_many(
+            {_latest_cache_key(sid): {"value": v, "timestamp": ts} for sid, (v, ts) in latest.items()},
+            timeout=None,
+        )
+
+
+def mark_persisted_many(items) -> None:
+    """Como mark_persisted, para varias lecturas en UN viaje a Redis. `items` = [(sensor, value, timestamp)]."""
+    data = {_persisted_cache_key(s.id): {"value": v, "timestamp": ts} for s, v, ts in items}
+    if data:
+        cache.set_many(data, timeout=None)
 
 
 def mark_latest(sensor, value: float, timestamp) -> None:

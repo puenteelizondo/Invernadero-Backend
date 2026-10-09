@@ -42,19 +42,23 @@ def publish_events(items) -> None:
     if channel_layer is None or not items:
         return
 
+    # Un solo mensaje por invernadero con todos sus eventos (antes, uno por
+    # evento): el navegador los sigue recibiendo uno por uno, igual que antes
+    # (ver GreenhouseConsumer.broadcast_events), pero Redis hace 1 envío en vez de N.
+    now = timezone.now().isoformat()
+    by_gh = {}
+    for gid, event, payload in items:
+        by_gh.setdefault(gid, []).append({"event": event, "timestamp": now, "payload": payload})
+
     async def _send_all():
         # En serie, NO con gather: channels_redis tiene un pool de conexiones
         # acotado y lanzar decenas de group_send a la vez lo desborda
         # ("Too many connections") cuando hay varios dispositivos a la vez.
-        for gid, event, payload in items:
-            await channel_layer.group_send(
-                f"greenhouse_{gid}",
-                {
-                    "type": "broadcast_event",
-                    "event": event,
-                    "timestamp": timezone.now().isoformat(),
-                    "payload": payload,
-                },
-            )
+        for gid, evs in by_gh.items():
+            if len(evs) == 1:
+                msg = {"type": "broadcast_event", **evs[0]}
+            else:
+                msg = {"type": "broadcast_events", "events": evs}
+            await channel_layer.group_send(f"greenhouse_{gid}", msg)
 
     async_to_sync(_send_all)()

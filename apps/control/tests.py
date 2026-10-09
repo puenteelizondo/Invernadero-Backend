@@ -441,8 +441,10 @@ class DeviceRealtimeTests(TransactionTestCase):
                 m = await asyncio.wait_for(layer.receive(name), wait)
             except asyncio.TimeoutError:
                 return got
-            if m.get("event") == kind:
-                got.append(m["payload"])
+            # Los lotes viajan juntos por Redis ("broadcast_events"); el navegador los recibe uno por uno.
+            for e in (m.get("events") or [m]):
+                if e.get("event") == kind:
+                    got.append(e["payload"])
 
     # ---- actuadores ----------------------------------------------------------
     async def test_al_conectar_recibe_el_estado_de_sus_actuadores(self):
@@ -740,3 +742,37 @@ class OriginEnProduccionTests(TransactionTestCase):
                 self.assertFalse((await nav.connect())[0])
         finally:
             importlib.reload(asgi_mod)
+
+
+class LoteDeEventosAlNavegadorTests(TransactionTestCase):
+    """Un lote de lecturas viaja junto por Redis, pero el navegador recibe cada lectura por separado, como antes."""
+
+    def setUp(self):
+        cache.clear()
+        self.w = build_world()
+        self.u = make_users(self.w)
+        Sensor.objects.create(name="t2", sensor_type=self.w["a"]["sensor"].sensor_type,
+                              greenhouse=self.w["a"]["gh"], device=self.w["a"]["dev"])
+
+    async def test_navegador_recibe_cada_lectura_por_separado(self):
+        from apps.readings.ingest import ingest_readings
+        from apps.realtime.tokens import issue_ws_token
+        from config.asgi import application
+
+        token = await database_sync_to_async(issue_ws_token)(self.u["owner"])
+        page = WebsocketCommunicator(application, f"/ws/greenhouses/{self.w['a']['gh'].pk}/?token={token}")
+        ok, _ = await page.connect()
+        self.assertTrue(ok)
+        await page.receive_json_from()          # snapshot
+
+        def mandar():
+            dev = Device.objects.get(pk=self.w["a"]["dev"].pk)
+            ids = list(Sensor.objects.filter(device=dev).values_list("pk", flat=True))
+            return ingest_readings(dev, [{"sensor_id": i, "value": 21.5} for i in ids])
+
+        r = await database_sync_to_async(mandar)()
+        self.assertEqual(r["accepted"], 2)
+        msgs = [await page.receive_json_from(timeout=2) for _ in range(2)]
+        self.assertEqual([m["event"] for m in msgs], ["sensor_reading", "sensor_reading"])
+        self.assertEqual({m["payload"]["value"] for m in msgs}, {21.5})
+        await page.disconnect()

@@ -80,6 +80,7 @@ class DeviceConsumer(AsyncWebsocketConsumer):
         self._joined = False
         self._ping_task = None
         self._last_notice = 0.0
+        self._last_online_touch = time.monotonic()
 
         await self.channel_layer.group_add(self.group, self.channel_name)
         self._joined = True
@@ -138,9 +139,15 @@ class DeviceConsumer(AsyncWebsocketConsumer):
         if not isinstance(msg, dict):
             return
 
-        self._last_rx = time.monotonic()
-        services.touch_online(self.device_id)
-        await self._touch_last_seen()
+        now = time.monotonic()
+        self._last_rx = now
+        # "En línea" dura 90 s en la caché: basta renovarlo cada 15 s (antes, en
+        # cada mensaje, con 2 viajes a Redis que además frenaban a todos).
+        if now - self._last_online_touch > 15:
+            self._last_online_touch = now
+            await database_sync_to_async(services.touch_online, thread_sensitive=False)(self.device_id)
+        if now - self._last_seen_write >= 30:
+            await self._touch_last_seen()
 
         event = msg.get("event")
         try:
@@ -166,12 +173,11 @@ class DeviceConsumer(AsyncWebsocketConsumer):
             else {"sensor_id": None, "value": i.get("value") if isinstance(i, dict) else None}
             for i in items
         ]
-        if not await self._within_limit(len(items)):
+        result = await self._ingest(items)
+        if result is None:
             await self._notice({"error": "rate_limited",
                                 "detail": f"Demasiadas lecturas: máximo {READINGS_PER_SEC} por segundo por dispositivo."})
             return
-
-        result = await self._ingest(items)
         rejected = [r for r in result["results"] if r["status"] != "accepted"]
         if rejected:
             await self._notice({"rejected": [
@@ -179,11 +185,6 @@ class DeviceConsumer(AsyncWebsocketConsumer):
                  "errors": r.get("errors")}
                 for r in rejected[:5]
             ]})
-
-    async def _within_limit(self, n):
-        from apps.readings.ingest import within_device_limit
-
-        return await database_sync_to_async(within_device_limit)(self.device_id, n)
 
     async def _notice(self, data):
         """Avisa al dispositivo (para el monitor serie), sin inundarlo: 1 aviso cada pocos segundos."""
@@ -296,11 +297,18 @@ class DeviceConsumer(AsyncWebsocketConsumer):
             .order_by("pk").values_list("pk", "state")
         ]
 
-    @database_sync_to_async
-    def _ingest(self, items):
-        from apps.readings.ingest import ingest_readings
+    async def _ingest(self, items):
+        # thread_sensitive=False: las lecturas de distintos ESP32 se procesan en
+        # paralelo (mientras uno espera a Postgres/Redis, otro avanza). Antes todas
+        # iban en fila en un solo hilo y con ~50 ESP32 la página se atrasaba segundos.
+        return await database_sync_to_async(self._ingest_sync, thread_sensitive=False)(items)
+
+    def _ingest_sync(self, items):
+        from apps.readings.ingest import ingest_readings, within_device_limit
         from apps.sensors.models import Device
 
+        if not within_device_limit(self.device_id, len(items)):
+            return None
         device = Device.objects.filter(pk=self.device_id, is_active=True).first()
         if device is None:      # lo desactivaron mientras estaba conectado
             return {"accepted": 0, "persisted": 0, "rejected": len(items),
